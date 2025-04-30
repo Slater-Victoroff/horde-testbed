@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Horde Testbed</title>
+    <script src="https://cdn.babylonjs.com/babylon.js"></script>
+  </head>
+  <body>
+    <div id="startScreen" class="overlay">
+      <h1>Horde Testbed</h1>
+      <button id="startButton">Start Game</button>
+    </div>
+    
+    <div id="gameOverScreen" class="overlay" style="display: none;">
+      <h1>Game Over</h1>
+      <button id="restartButton">Restart</button>
+    </div>
+
+    <div id="healthBar" style="position: absolute; top: 10px; left: 10px; width: 200px; height: 20px; background: red;"></div>
+
+    <canvas id="renderCanvas" touch-action="none"></canvas>
+    <div id="difficultyLabel" style="position:absolute; top:10px; left:10px; color:white; font-family:monospace; z-index:20;"></div>
+    <canvas id="vectorMap" width="640" height="640"></canvas>
+    <canvas id="scalarMap" width="640" height="640"></canvas>
+    <script type="module" src="app.js"></script>
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background: #111;
+      }
+
+      #renderCanvas {
+        width: 100vw;
+        height: 100vh;
+        display: block;
+      }
+
+      #scalarMap {
+        position: absolute;
+        bottom: 10px; /* Position 10px from the bottom */
+        right: 10px;  /* Position 10px from the right */
+        width: 200px; /* Set the width of the overlay */
+        height: 200px; /* Set the height of the overlay */
+        border: 2px solid white; /* Add a white border */
+        background: rgba(0, 0, 0, 0.5); /* Optional: Add a semi-transparent background */
+        z-index: 1;
+        pointer-events: none; /* Ensure it doesn't block interactions with the main canvas */
+      }
+
+      #vectorMap {
+        position: absolute;
+        bottom: 10px; /* Position 10px from the bottom */
+        right: 10px;  /* Position 10px from the right */
+        width: 200px; /* Set the width of the overlay */
+        height: 200px; /* Set the height of the overlay */
+        z-index: 2;
+        pointer-events: none; /* Ensure it doesn't block interactions with the main canvas */
+      }
+
+      .overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        background: rgba(0, 0, 0, 0.8);
+        color: white;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        z-index: 20;
+      }
+
+    </style>
+  </body>
+</html>

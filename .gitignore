@@ -1,0 +1,47 @@
+# Ignore Python cache files
+__pycache__/
+*.py[cod]
+
+# Byte-compiled / optimized / DLL files
+*.so
+*.dll
+*.dylib
+*.pyd
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# VSCode / editor configs
+.vscode/
+*.swp
+
+# Virtualenv / pipenv / conda envs
+env/
+venv/
+.venv/
+
+# PyTorch / model training artifacts
+*.pth
+*.pt
+*.ckpt
+*.onnx
+
+# Logs, debug, and profiling outputs
+*.log
+*.tmp
+*.profile
+
+# Ignore specific local folders
+static/
+backend/ai/debug_outputs/
+
+# Ignore large temporary data
+*.npy
+*.npz
+*.h5
+*.csv
+*.jsonl
+
+# Ignore system junk
+.DS_Store
+Thumbs.db
