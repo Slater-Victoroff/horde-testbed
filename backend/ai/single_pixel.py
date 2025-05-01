@@ -11,6 +11,7 @@ from PIL import Image
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
 import torchvision.transforms as transforms
@@ -25,11 +26,83 @@ POS_CHANNELS = 6
 CONTROL_CHANNELS = 2
 
 
-class VFXNetDecoder(nn.Module):
+def _kernel_expand(raw_pos, height, width, kernel_size=3):
+    """
+    Expand the raw positions to include neighboring pixels based on the kernel size.
+    Handles edges by padding with a default value.
+    :param raw_pos: Tensor of shape [H*W, 2] containing x and y coordinates.
+    :param height: Height of the image.
+    :param width: Width of the image.
+    :param kernel_size: Size of the kernel for expansion.
+    :param padding_value: Value to use for padding at the edges.
+    :return: Tensor of shape [H*W, kernel_size^2, 2] containing expanded positions.
+    """
+    H, W = height, width
+    x_coords = raw_pos[:, 0]
+    y_coords = raw_pos[:, 1]
+
+    # Create a grid of offsets based on the kernel size
+    offsets = torch.arange(-(kernel_size // 2), kernel_size // 2 + 1, device=raw_pos.device)
+    x_offsets, y_offsets = torch.meshgrid(offsets, offsets, indexing="ij")
+
+    # Expand the coordinates
+    expanded_x = torch.clamp(x_coords.unsqueeze(-1) + x_offsets.flatten(), 0, width - 1)
+    expanded_y = torch.clamp(y_coords.unsqueeze(-1) + y_offsets.flatten(), 0, height - 1)
+
+    return torch.stack([expanded_x, expanded_y], dim=-1).view(-1, kernel_size ** 2, 2)
+
+
+def _compute_positional_encodings(raw_pos, height, width, num_encodings=POS_CHANNELS, exponential=False):
+    """
+    Generate positional encodings for the given raw positions.
+    :param raw_pos: Tensor of shape [..., 2] containing x and y coordinates in the last axis.
+    :param height: Height of the image.
+    :param width: Width of the image.
+    :param num_encodings: Number of positional encoding channels to generate.
+    :return: Tensor of shape [..., num_encodings] containing positional encodings.
+    """
+    x_coords = torch.clamp(raw_pos[..., 0:1], 0, width - 1) / width  # Clamp and normalize x-coordinates
+    y_coords = torch.clamp(raw_pos[..., 1:2], 0, height - 1) / height  # Clamp and normalize y-coordinates
+
+    encodings = [x_coords, y_coords]
+    
+    # Generate additional sinusoidal encodings
+    for i in range(1, (num_encodings - 2) // 2 + 1):
+        if exponential:
+            encodings.extend([
+                torch.sin(2 * torch.pi * (2 ** i) * x_coords),
+                torch.sin(2 * torch.pi * (2 ** i) * y_coords)
+            ])
+        else:
+            encodings.extend([
+                torch.sin(2 * torch.pi * i * x_coords),
+                torch.sin(2 * torch.pi * i * y_coords)
+            ])
+
+    # If num_encodings is odd, add one more cosine term
+    if len(encodings) < num_encodings:
+        for i in range(1, (num_encodings - len(encodings)) // 2 + 1):
+            if exponential:
+                encodings.extend([
+                    torch.cos(2 * torch.pi * (2 ** i) * x_coords),
+                    torch.cos(2 * torch.pi * (2 ** i) * y_coords)
+                ])
+            else:
+                encodings.extend([
+                    torch.cos(2 * torch.pi * i * x_coords),
+                    torch.cos(2 * torch.pi * i * y_coords)
+                ])
+
+    positional_encodings = torch.cat(encodings[:num_encodings], dim=-1)
+    return positional_encodings
+
+
+class VFXNetPixelDecoder(nn.Module):
     def __init__(self, height, width):
         super().__init__()
         self.height = height
         self.width = width
+        self.film = nn.Linear(CONTROL_CHANNELS, 64 * 2)
         self.layers = nn.ModuleList([
             nn.Linear(LATENT_IMAGE_CHANNELS + POS_CHANNELS + CONTROL_CHANNELS, 64),
             nn.GELU(),
@@ -41,16 +114,76 @@ class VFXNetDecoder(nn.Module):
             nn.Sigmoid()
         ])
 
-    def forward(self, latent, pos_enc, control, return_hidden_layer=None):
-        # Expects properly formatted positional encodings. They should already be on the right device
-        x = torch.cat([latent, pos_enc, control], dim=1)  # [B, LATENT_IMAGE_CHANNELS + POS_CHANNELS + CONTROL_CHANNELS]
+    def forward(self, latent, raw_pos, control, return_hidden_layer=None):
+        # Use raw_pos to index into the latent
+        H, W, C = latent.shape
+        assert (H, W) == (self.height, self.width)
+        latent_flat = latent.view(-1, C)  # Flatten latent to [H*W, C]
+        linear_indices = raw_pos[:, 1] * self.width + raw_pos[:, 0]  # Compute linear indices
+        indexed_latent = latent_flat[linear_indices]  # Gather latent values based on raw_pos
+        pos_enc = _compute_positional_encodings(raw_pos, self.height, self.width)
+        x = torch.cat([indexed_latent, pos_enc, control], dim=1)  # [B, LATENT_IMAGE_CHANNELS + POS_CHANNELS + CONTROL_CHANNELS]
 
         outputs = x
         for i, layer in enumerate(self.layers):
-            outputs = layer(outputs)
+            if i == 1:  # First layer, apply film
+                gamma, beta = self.film(control).chunk(2, dim=-1)
+                outputs = layer((gamma * outputs) + beta)
+            else:    
+                outputs = layer(outputs)
             if return_hidden_layer is not None and i == return_hidden_layer:
                 return outputs
         return outputs
+
+
+class VFXNetPatchDecoder(nn.Module):
+    def __init__(self, height, width, kernel_size=3):
+        super().__init__()
+        self.height = height
+        self.width = width
+        self.kernel_size = kernel_size
+        self.input_channels = LATENT_IMAGE_CHANNELS * (kernel_size ** 2) + POS_CHANNELS * (kernel_size ** 2) + CONTROL_CHANNELS * (kernel_size ** 2)
+
+        self.layers = nn.ModuleList([
+            nn.Linear(self.input_channels, 64),
+            nn.GELU(),
+            nn.Linear(64, 128),
+            nn.GELU(),
+            nn.Linear(128, 64),
+            nn.GELU(),
+            nn.Linear(64, INPUT_IMAGE_CHANNELS),
+            nn.Sigmoid()
+        ])
+    
+    def _forward(self, x, return_hidden_layer=None):
+        output = x
+        for i, layer in enumerate(self.layers):
+            output = layer(output)
+            if return_hidden_layer is not None and i == return_hidden_layer:
+                return output
+        return output
+    
+    def forward(self, latent, raw_pos, control):
+        """
+        latent:   [B, H, W, latent_dim]
+        pos_enc:  [B, H, W, pos_dim]
+        control:  [B, control_dim]
+        """
+        expanded_pos = _kernel_expand(raw_pos, self.height, self.width, kernel_size=self.kernel_size)
+        H, W, C = latent.shape
+        assert (H, W) == (self.height, self.width)
+
+        # Flatten the latent image for easier indexing
+        latent_flat = latent.view(-1, latent.shape[-1])  # [H*W, C]
+        linear_indices = expanded_pos[..., 1] * self.width + expanded_pos[..., 0]  # [B, 9]
+        latent_values = latent_flat[linear_indices]  # [B, 9, C]
+        pos_enc = _compute_positional_encodings(expanded_pos, self.height, self.width)
+
+        control_expanded = control.unsqueeze(1).expand(-1, self.kernel_size ** 2, -1)
+
+        patches = torch.cat([latent_values, pos_enc, control_expanded], dim=-1)
+        unrolled = patches.view(patches.shape[0], -1)  # Unroll to [B, kernel**2 * Something]
+        return self._forward(unrolled)
 
 
 class VFXNet(nn.Module):
@@ -62,10 +195,10 @@ class VFXNet(nn.Module):
         _x_coords = torch.arange(width).repeat(height, 1).view(-1, 1)
         _y_coords = torch.arange(height).repeat(width, 1).t().contiguous().view(-1, 1)
         self.raw_pos = torch.cat([_x_coords, _y_coords], dim=1)  # [H*W, 2]
-        self.pos_enc = self._compute_positional_encodings(self.raw_pos, height, width)
+        self.pos_enc = _compute_positional_encodings(self.raw_pos, height, width)
 
         self.shared_latent = nn.Parameter(torch.randn(height, width, LATENT_IMAGE_CHANNELS))  # Shared latent image
-        self.decoder = VFXNetDecoder(height, width)
+        self.decoder = VFXNetPixelDecoder(height, width)
         self.raw_pos = self.raw_pos.to(device)  # Move raw positions to the correct device
         self.pos_enc = self.pos_enc.to(device)  # Move positional encodings to the correct device
         self._initialize_weights() # Apply Xavier initialization to all layers
@@ -77,64 +210,21 @@ class VFXNet(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
-    def _compute_positional_encodings(self, raw_pos, height, width, num_encodings=POS_CHANNELS):
-        """
-        Generate positional encodings for the given raw positions.
-        :param raw_pos: Tensor of shape [H*W, 2] containing x and y coordinates.
-        :param height: Height of the image.
-        :param width: Width of the image.
-        :param num_encodings: Number of positional encoding channels to generate.
-        :return: Tensor of shape [H, W, num_encodings] containing positional encodings.
-        """
-        x_coords = raw_pos[:, 0:1] / width  # Normalize x-coordinates
-        y_coords = raw_pos[:, 1:2] / height  # Normalize y-coordinates
-
-        encodings = [x_coords, y_coords]
-
-        # Generate additional sinusoidal encodings
-        for i in range(1, (num_encodings - 2) // 2 + 1):
-            x_sin_coords = torch.sin(2 * torch.pi * i * x_coords)
-            y_sin_coords = torch.sin(2 * torch.pi * i * y_coords)
-            # x_sin_coords = torch.sin(2 * torch.pi * (2 ** i) * x_coords)
-            # y_sin_coords = torch.sin(2 * torch.pi * (2 ** i) * y_coords)
-            encodings.extend([x_sin_coords, y_sin_coords])
-
-        # If num_encodings is odd, add one more cosine term
-        if len(encodings) < num_encodings:
-            for i in range(1, (num_encodings - len(encodings)) // 2 + 1):
-                x_cos_coords = torch.cos(2 * torch.pi * i * x_coords)
-                y_cos_coords = torch.cos(2 * torch.pi * i * y_coords)
-                encodings.extend([x_cos_coords, y_cos_coords])
-
-        # Concatenate encodings and reshape to [H, W, num_encodings]
-        positional_encodings = torch.cat(encodings[:num_encodings], dim=1)
-        return positional_encodings.view(height, width, num_encodings)
 
     def forward(self, raw_pos, control):
-        # Convert raw_pos (Nx2) into indices for shared_latent (HxWx4)
-        H, W, _ = self.shared_latent.shape
-        x_indices = raw_pos[:, 0].long().clamp(0, W - 1)  # Ensure indices are within bounds
-        y_indices = raw_pos[:, 1].long().clamp(0, H - 1)  # Ensure indices are within bounds
-        latent_section = self.shared_latent[y_indices, x_indices]  # Nx4
-
-        pos_subset = self.pos_enc[y_indices, x_indices]
-        return self.decoder(latent_section, pos_subset, control)
+        return self.decoder(self.shared_latent, raw_pos, control)
     
-    def full_image(self, control, device='cuda'):
-        full_control = control.repeat(self.raw_pos.shape[0], 1).to(device)  # Repeat control for all pixels
-        print("full_control shape:", full_control.shape)
-        flattened_latent = self.shared_latent.view(-1, LATENT_IMAGE_CHANNELS)  # Flatten shared_latent
-        print("flattened_latent shape:", flattened_latent.shape)
-        flattened_latent = flattened_latent.to(device)  # Move to the correct device
-
-        all_response = self.decoder(flattened_latent, self.pos_enc.view(-1, POS_CHANNELS), full_control)
-        print("all_response shape:", all_response.shape)
-        shaped_image = all_response.view(self.height, self.width, INPUT_IMAGE_CHANNELS)
+    def full_image(self, control):
+        # Expand control to match the first dimension of self.raw_pos
+        expanded_control = control.unsqueeze(1).expand(-1, self.raw_pos.size(0), -1).reshape(-1, control.size(-1))
+        response = self.decoder(self.shared_latent, self.raw_pos, expanded_control)
+        print("all_response shape:", response.shape)
+        shaped_image = response.view(self.height, self.width, INPUT_IMAGE_CHANNELS)
         print("shaped_image shape:", shaped_image.shape)
         return shaped_image
 
     def save_as_glsl(self, directory, source_images, test=True):
-        # Ensure the directory is a string and ends with a slash
+        #TODO: Make work.
         directory = str(directory)
         if not directory.endswith('/'):
             directory += '/'

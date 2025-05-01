@@ -72,9 +72,9 @@ def main():
     results_dir.mkdir(exist_ok=True)
 
     # criterion = GammaCorrectedMSELoss().to(device)
-    criterion = FrequencyLoss().to(device)
-    # criterion = nn.MSELoss().to(device)
-    model = train_vfx_model(STATIC_DIR / "VFX/hollow-flame/", criterion, device=device, experiment_name="freq-loss")
+    # criterion = FrequencyLoss().to(device)
+    criterion = nn.MSELoss().to(device)
+    model = train_vfx_model(STATIC_DIR / "VFX/hollow-flame/", criterion, device=device, experiment_name="state")
     
     # Save model state
     model_path = results_dir / f"vfx_model_combined{datetime.now().strftime('%Y%m%d_%H%M%S')}.pth"
