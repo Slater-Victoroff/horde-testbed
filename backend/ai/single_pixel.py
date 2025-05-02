@@ -97,6 +97,188 @@ def _compute_positional_encodings(raw_pos, height, width, num_encodings=POS_CHAN
     return positional_encodings
 
 
+class SineLayer(nn.Module):
+    """Siren activation function."""
+    def __init__(self, in_features, out_features, is_first=False, omega=10.0):
+        super().__init__()
+        self.omega = omega
+        self.is_first = is_first
+        self.linear = nn.Linear(in_features, out_features)
+        self.init_weights()
+
+    def init_weights(self):
+        with torch.no_grad():
+            if self.is_first:
+                self.linear.weight.uniform_(-1 / self.linear.in_features, 1 / self.linear.in_features)
+            else:
+                self.linear.weight.uniform_(
+                    -np.sqrt(6 / self.linear.in_features) / self.omega,
+                    np.sqrt(6 / self.linear.in_features) / self.omega
+                )
+
+    def forward(self, x):
+        return torch.sin(self.omega * self.linear(x))
+
+
+class Tanh01(nn.Module):
+    def forward(self, x):
+        return 0.5 * (torch.tanh(x) + 1.0)
+
+
+class VFXSpiralNetDecoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.first_hidden_dim = 64
+        self.prefilm_dims = 16
+        self.input_dim = LATENT_IMAGE_CHANNELS + POS_CHANNELS
+
+        self.control_embed = nn.Sequential(
+            nn.Linear(CONTROL_CHANNELS, self.prefilm_dims),
+            nn.ReLU(),
+        )
+        self.time_embed = nn.Sequential(
+            nn.Linear(6, self.prefilm_dims),  # time is a scalar (normalized frame index)
+            nn.ReLU(),
+        )
+        self.pos_embed = nn.Sequential(
+            nn.Linear(12, self.prefilm_dims),  # Don't use positional encodings in Film layer
+            nn.ReLU(),
+        )
+
+        self.film = nn.Linear(3 * self.prefilm_dims, self.first_hidden_dim * 2)
+        
+        self.layers = nn.ModuleList([
+            nn.Linear(self.input_dim, self.first_hidden_dim),
+            nn.GELU(),
+            nn.Linear(self.first_hidden_dim, self.first_hidden_dim),
+            nn.GELU(),
+            nn.Linear(self.first_hidden_dim, INPUT_IMAGE_CHANNELS),
+            nn.Sigmoid()
+        ])
+    
+    def forward(self, latent, raw_pos, control, return_hidden_layer=None):
+        H, W, C = latent.shape
+        latent_flat = latent.view(-1, C)  # Flatten latent to [H*W, C]
+        linear_indices = raw_pos[:, 1] * W + raw_pos[:, 0]
+        indexed_latent = latent_flat[linear_indices]
+        pos_enc = _compute_positional_encodings(raw_pos, H, W)
+        main_input = torch.concat([indexed_latent, pos_enc], dim=1)  # [B, LATENT_IMAGE_CHANNELS + POS_CHANNELS]
+
+
+        control_feat = self.control_embed(control)
+        x = pos_enc[:, 0:1]  # normalized x in [0, 1]
+        y = pos_enc[:, 1:2]  # normalized y in [0, 1]
+
+        # Scale to [0, 2π]
+        x = x * 2 * torch.pi
+        y = y * 2 * torch.pi
+
+        # Spiral-style position embedding
+        spiral_pos = torch.cat([
+            torch.sin(x), torch.cos(x),
+            torch.sin(2 * x), torch.cos(2 * x),
+            torch.sin(3 * x), torch.cos(3 * x),
+            torch.sin(y), torch.cos(y),
+            torch.sin(2 * y), torch.cos(2 * y),
+            torch.sin(3 * y), torch.cos(3 * y)
+        ], dim=-1)  # [B, 12]
+
+        pos_feat = self.pos_embed(spiral_pos)
+        t = control[:, 0:1] * 2 * torch.pi  # map to [0, 2π]
+
+        # Spiral embedding: sin/cos for base cycle, sin/cos of harmonic for texture
+        spiral_time = torch.cat([
+            torch.sin(t), torch.cos(t),
+            torch.sin(2 * t), torch.cos(2 * t),
+            torch.sin(3 * t), torch.cos(3 * t)
+        ], dim=-1)  # [B, 6]
+
+        time_feat = self.time_embed(spiral_time)
+
+        film_input = torch.cat([control_feat, pos_feat, time_feat], dim=-1)  # [B, 3 * pref_dim]
+
+        outputs = main_input
+        for i, layer in enumerate(self.layers):
+            if i == 1:  # First layer, apply film
+                gamma, beta = self.film(film_input).chunk(2, dim=-1)
+                outputs = layer((gamma * outputs) + beta)
+            else:    
+                outputs = layer(outputs)
+            if return_hidden_layer is not None and i == return_hidden_layer:
+                return outputs
+        return outputs
+
+
+class VFXNetContextDecoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.first_hidden_dim = 64
+        self.prefilm_dims = 16
+        self.input_dim = LATENT_IMAGE_CHANNELS + POS_CHANNELS
+
+        self.control_embed = nn.Sequential(
+            nn.Linear(CONTROL_CHANNELS, self.prefilm_dims),
+            nn.ReLU(),
+        )
+        self.time_embed = nn.Sequential(
+            nn.Linear(1, self.prefilm_dims),  # time is a scalar (normalized frame index)
+            nn.ReLU(),
+        )
+        self.pos_embed = nn.Sequential(
+            nn.Linear(2, self.prefilm_dims),  # Don't use positional encodings in Film layer
+            nn.ReLU(),
+        )
+
+        self.film = nn.Linear(3 * self.prefilm_dims, self.first_hidden_dim * 2)
+        
+        self.layers = nn.ModuleList([
+            nn.Linear(self.input_dim, self.first_hidden_dim),
+            nn.GELU(),
+            nn.Linear(self.first_hidden_dim, 2 * self.first_hidden_dim),
+            nn.GELU(),
+            nn.Linear(2 * self.first_hidden_dim, self.first_hidden_dim),
+            nn.GELU(),
+            nn.Linear(self.first_hidden_dim, INPUT_IMAGE_CHANNELS),
+            nn.Sigmoid()
+        ])
+    
+    def forward(self, latent, raw_pos, control, return_hidden_layer=None):
+        H, W, C = latent.shape
+        latent_flat = latent.view(-1, C)  # Flatten latent to [H*W, C]
+        linear_indices = raw_pos[:, 1] * W + raw_pos[:, 0]
+        indexed_latent = latent_flat[linear_indices]
+        pos_enc = _compute_positional_encodings(raw_pos, H, W)
+        x = torch.concat([indexed_latent, pos_enc], dim=1)  # [B, LATENT_IMAGE_CHANNELS + POS_CHANNELS]
+
+
+        control_feat = self.control_embed(control)
+        pos_feat = self.pos_embed(pos_enc[:, 0:2])  # First two channels are x and y
+        time_feat = self.time_embed(control[:, 0:1])  # Assuming time is the first control channel
+        film_input = torch.cat([control_feat, pos_feat, time_feat], dim=-1)  # [B, 3 * pref_dim]
+
+        outputs = x
+        for i, layer in enumerate(self.layers):
+            if i == 1:  # First layer, apply film
+                gamma, beta = self.film(film_input).chunk(2, dim=-1)
+                outputs = layer((gamma * outputs) + beta)
+            else:    
+                outputs = layer(outputs)
+            if return_hidden_layer is not None and i == return_hidden_layer:
+                return outputs
+        return outputs
+
+
+class VFXNetContextSirenDecoder(VFXNetContextDecoder):
+    def __init__(self):
+        super().__init__()
+        self.layers = nn.ModuleList([
+            SineLayer(self.input_dim, self.first_hidden_dim, is_first=True),
+            SineLayer(self.first_hidden_dim, 2 * self.first_hidden_dim),
+            SineLayer(2 * self.first_hidden_dim, self.first_hidden_dim),
+            nn.Linear(self.first_hidden_dim, INPUT_IMAGE_CHANNELS),
+            Tanh01()
+        ])
+
 class VFXNetPixelDecoder(nn.Module):
     def __init__(self, height, width):
         super().__init__()
@@ -134,6 +316,18 @@ class VFXNetPixelDecoder(nn.Module):
             if return_hidden_layer is not None and i == return_hidden_layer:
                 return outputs
         return outputs
+
+
+class VFXNetSirenDecoder(VFXNetPixelDecoder):
+    def __init__(self, height, width):
+        super().__init__(height, width)
+        self.layers = nn.ModuleList([
+            SineLayer(LATENT_IMAGE_CHANNELS + POS_CHANNELS + CONTROL_CHANNELS, 64, is_first=True),
+            SineLayer(64, 128),
+            SineLayer(128, 64),
+            nn.Linear(64, INPUT_IMAGE_CHANNELS),
+            Tanh01()
+        ])
 
 
 class VFXNetPatchDecoder(nn.Module):
@@ -197,11 +391,11 @@ class VFXNet(nn.Module):
         self.raw_pos = torch.cat([_x_coords, _y_coords], dim=1)  # [H*W, 2]
         self.pos_enc = _compute_positional_encodings(self.raw_pos, height, width)
 
-        self.shared_latent = nn.Parameter(torch.randn(height, width, LATENT_IMAGE_CHANNELS))  # Shared latent image
-        self.decoder = VFXNetPixelDecoder(height, width)
-        self.raw_pos = self.raw_pos.to(device)  # Move raw positions to the correct device
-        self.pos_enc = self.pos_enc.to(device)  # Move positional encodings to the correct device
-        self._initialize_weights() # Apply Xavier initialization to all layers
+        self.shared_latent = nn.Parameter(torch.randn(height, width, LATENT_IMAGE_CHANNELS))
+        self.decoder = VFXSpiralNetDecoder()
+        self.raw_pos = self.raw_pos.to(device)
+        self.pos_enc = self.pos_enc.to(device)
+        self._initialize_weights()
 
     def _initialize_weights(self):
         for module in self.modules():
@@ -218,9 +412,7 @@ class VFXNet(nn.Module):
         # Expand control to match the first dimension of self.raw_pos
         expanded_control = control.unsqueeze(1).expand(-1, self.raw_pos.size(0), -1).reshape(-1, control.size(-1))
         response = self.decoder(self.shared_latent, self.raw_pos, expanded_control)
-        print("all_response shape:", response.shape)
         shaped_image = response.view(self.height, self.width, INPUT_IMAGE_CHANNELS)
-        print("shaped_image shape:", shaped_image.shape)
         return shaped_image
 
     def save_as_glsl(self, directory, source_images, test=True):
@@ -357,15 +549,31 @@ def load_images(image_dir, device):
         pos_tensor = torch.cat([x_coords, y_coords], dim=1)  # [H*W, 2]
         pos_tensors.append(pos_tensor)
 
-        # Combine all tensors
+    # Combine all tensors
     image_tensor = torch.cat(image_tensors, dim=0)  # [H*W*images, INPUT_IMAGE_CHANNELS]
     raw_pos = torch.cat(pos_tensors, dim=0)  # [H*W*images, 2]
     control = torch.cat(control_tensors, dim=0)  # [H*W*images, CONTROL_CHANNELS]
+
+    # Identify the time axis
+    time_axis = None
+    for i in range(control.size(1)):
+        unique_values = torch.unique(control[:, i])
+        print(unique_values[1:] - unique_values[:-1])
+        if len(unique_values) > 1 and torch.all(unique_values[1:] - unique_values[:-1] == 1):  # Check for sequential increments
+            time_axis = i
+            break
+
+    if time_axis is not None and time_axis != 0:
+        # Swap the time axis to the first position
+        control = torch.cat([control[:, time_axis:time_axis + 1], control[:, :time_axis], control[:, time_axis + 1:]], dim=1)
+    elif time_axis is None:
+        raise ValueError("Unable to identify a time axis in the control tensor.")
 
     # Normalize each control channel to the range [0, 1]
     control_min, _ = control.min(dim=0, keepdim=True)
     control_max, _ = control.max(dim=0, keepdim=True)
     control = (control - control_min) / (control_max - control_min + 1e-8)  # Add epsilon to avoid division by zero
+
     print("Normalized control tensor:", control[0:5])
     image_tensor = image_tensor.to(device)
     control = control.to(device)
@@ -431,11 +639,8 @@ def generate_control_animation(model, control_tensor, gif_path, num_frames=50):
     with torch.no_grad():
         for control in sampled_controls:
             reconstructed_rgb = model.full_image(control.unsqueeze(0))  # Pass control vector to model
-            print(f"Reconstructed RGB shape: {reconstructed_rgb.shape}")
             rgb_image = reconstructed_rgb.squeeze(0).cpu().numpy()  # [H, W, C]
-            print(f"RGB image shape: {rgb_image.shape}")
             frame = (rgb_image * 255).astype(np.uint8)  # Convert to uint8 for GIF
-            print(f"Frame shape: {frame.size}")
             frames.append(frame)
 
     iio.imwrite(gif_path, frames)
