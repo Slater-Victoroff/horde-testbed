@@ -34,6 +34,7 @@ venv/
 # Ignore specific local folders
 static/
 backend/ai/debug_outputs/
+certbot/
 
 # Ignore large temporary data
 *.npy
