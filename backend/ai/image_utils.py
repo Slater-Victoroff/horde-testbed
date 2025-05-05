@@ -54,6 +54,8 @@ def load_exr_image(image_path):
             rgba = exr_file.channels()["RGBA"].pixels
         else:
             raise ValueError("EXR file does not contain RGB or RGBA channels.")
+    rgba = np.clip(rgba, 0, None)
+    rgba = rgba / (1 + rgba)
     return rgba
 
 
@@ -65,8 +67,7 @@ def load_images(image_dir, device, input_image_channels=4, control_channels=2):
 
     def _process_frame(frame, frame_idx=None):
         nonlocal shape
-        frame = remove_background(frame)
-        frame = np.array(frame) / 255.0 if frame.max() > 1 else frame  # Normalize to [0, 1] if needed
+        # frame = remove_background(frame)
         if frame.shape[-1] < input_image_channels:
             # Pad with 1s to match the required number of channels
             padding = np.ones((*frame.shape[:-1], input_image_channels - frame.shape[-1]), dtype=frame.dtype)
@@ -96,7 +97,8 @@ def load_images(image_dir, device, input_image_channels=4, control_channels=2):
             raise ValueError("Multiple GIF files found. Please provide only one GIF file.")
         gif_path = gif_files[0]
         gif_frames = iio.imread(gif_path, plugin="pillow")  # Load all frames from the GIF
-        for frame_idx, frame in enumerate(gif_frames):
+        normalized_frames = [gif_frame / 255.0 for gif_frame in gif_frames]
+        for frame_idx, frame in enumerate(normalized_frames):
             _process_frame(frame, frame_idx)
     else:
         # Process EXR files
@@ -110,6 +112,7 @@ def load_images(image_dir, device, input_image_channels=4, control_channels=2):
 
     # Combine all tensors
     image_tensor = torch.cat(image_tensors, dim=0)  # [H*W*images, INPUT_IMAGE_CHANNELS]
+    image_tensor = image_tensor / image_tensor.max()  # Normalize to [0, 1]
     raw_pos = torch.cat(pos_tensors, dim=0)  # [H*W*images, 2]
     control = torch.cat(control_tensors, dim=0)  # [H*W*images, CONTROL_CHANNELS]
     print("image_tensor shape:", image_tensor.shape)
@@ -219,7 +222,6 @@ def generate_control_animation(model, control_tensor, gif_path, num_frames=50, c
         sampled_controls.append(control)
     sampled_controls = torch.stack(sampled_controls)
     print(f"Sampled control tensor shape: {sampled_controls.shape}")
-
     # Generate frames
     frames = []
     with torch.no_grad():
@@ -227,12 +229,18 @@ def generate_control_animation(model, control_tensor, gif_path, num_frames=50, c
             reconstructed_rgb = model.full_image(control.unsqueeze(0))  # Pass control vector to model
             print(f"Reconstructed RGB shape: {reconstructed_rgb.shape}")
             rgb_image = reconstructed_rgb.squeeze(0).cpu().numpy()  # [H, W, C]
+            rgb_image = np.clip(rgb_image, 0, 1)
+            rgb_image = rgb_image ** (1 / 2.2)
+            
+            # Check if the output has 4 channels and remove the fourth channel if present
+            if rgb_image.shape[-1] == 4:
+                rgb_image = rgb_image[..., :3]
+            
             frame = (rgb_image * 255).astype(np.uint8)  # Convert to uint8 for GIF
             frames.append(frame)
 
     iio.imwrite(gif_path, frames)
     print(f"Control animation GIF saved to {gif_path}")
-
 
 def generate_control_grid_animation(model, control_tensor, gif_path, num_frames=50, axis_1=0, axis_2=1, axis_2_values=None):
     """

@@ -8,7 +8,7 @@ from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from torch.utils.data import DataLoader, TensorDataset
 
 from decoders import VFXSpiralNetDecoder, VFXNetPixelDecoder
-from losses import PerceptualLoss
+from losses import DCTLoss
 from utils import compute_positional_encodings
 from make_shader import decoder_to_glsl, compare_decoder_and_shader, save_weights_to_exr
 from image_utils import load_images, save_images
@@ -56,12 +56,20 @@ class VFXNet(nn.Module):
         return shaped_image
 
 
-def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, save_every=5, experiment_name=None):
+def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, save_every=5, perceptual_epoch=5, experiment_name=None):
     # Load images and create tensors
     image_tensor, raw_pos, control_tensor, shape = load_images(image_dir, device)
+    # print some stats to make sure these are correct
+    print(f"image_tensor shape: {image_tensor.shape}")
+    print(f"raw_pos shape: {raw_pos.shape}")
+    print(f"control_tensor shape: {control_tensor.shape}")
+    print(f"image_tensor min: {image_tensor.min()}, max: {image_tensor.max()}")
+    print(f"image_tensor mean: {image_tensor.mean()}, std: {image_tensor.std()}")
+    print(f"image_tensor dtype: {image_tensor.dtype}")
+    print(f"raw_pos min: {raw_pos.min()}, max: {raw_pos.max()}")
+    print(f"control_tensor min: {control_tensor.min()}, max: {control_tensor.max()}")
     pixel_loss = nn.MSELoss().to(device)
-    perceptual_loss = PerceptualLoss().to(device)
-    perceptual_weight = 0.1
+    dct_loss = DCTLoss().to(device)
 
     print("image_tensor shape:", image_tensor.shape)
     print("raw_pos shape:", raw_pos.shape)
@@ -89,7 +97,7 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, save
                 print(f"Batch {batch_num}/{len(train_dataloader)}")
             reconstructed_image = model(raw_pos, control)
 
-            loss = criterion(reconstructed_image, image)
+            loss = pixel_loss(reconstructed_image, image)
 
             optimizer.zero_grad()
             loss.backward()

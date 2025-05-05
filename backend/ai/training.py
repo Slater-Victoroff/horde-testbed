@@ -18,7 +18,7 @@ def main():
     # criterion = GammaCorrectedMSELoss().to(device)
     # criterion = FrequencyLoss().to(device)
     criterion = nn.MSELoss().to(device)
-    model = train_vfx_model(STATIC_DIR / "VFX/explosions/explosion00", device=device)
+    model = train_vfx_model(STATIC_DIR / "VFX/hollow-flame", device=device, experiment_name="tone-pixel-mapping")
     
     # Save model state
     model_path = results_dir / f"vfx_model_combined{datetime.now().strftime('%Y%m%d_%H%M%S')}.pth"

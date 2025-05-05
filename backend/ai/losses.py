@@ -1,6 +1,9 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import torch.fft
 from torchvision import models
+import torch_dct as dct
 
 
 class WeightedMSELoss(nn.Module):
@@ -57,7 +60,7 @@ class FrequencyLoss(nn.Module):
         return self.weight * freq_loss
 
 
-class VGGPerceptualLoss(nn.Module):
+class PerceptualLoss(nn.Module):
     def __init__(self):
         super().__init__()
         vgg = models.vgg16(weights=models.VGG16_Weights.DEFAULT).features[:16].eval()
@@ -75,3 +78,16 @@ class VGGPerceptualLoss(nn.Module):
         pred = self._normalize(pred)
         target = self._normalize(target)
         return nn.functional.mse_loss(self.vgg(pred), self.vgg(target))
+
+
+class DCTLoss(nn.Module):
+    def __init__(self, reduction='mean'):
+        super().__init__()
+        self.reduction = reduction
+
+    def forward(self, pred, target):
+        # pred/target: [B, C] with C=4 for RGBA
+        dct_pred = dct.dct(pred, norm='ortho')
+        dct_target = dct.dct(target, norm='ortho')
+        loss = F.mse_loss(dct_pred, dct_target, reduction=self.reduction)
+        return loss
