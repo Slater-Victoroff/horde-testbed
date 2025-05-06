@@ -68,7 +68,7 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, save
     print(f"image_tensor dtype: {image_tensor.dtype}")
     print(f"raw_pos min: {raw_pos.min()}, max: {raw_pos.max()}")
     print(f"control_tensor min: {control_tensor.min()}, max: {control_tensor.max()}")
-    pixel_loss = nn.MSELoss().to(device)
+    mse_loss = nn.MSELoss().to(device)
     dct_loss = DCTLoss().to(device)
 
     print("image_tensor shape:", image_tensor.shape)
@@ -97,7 +97,7 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, save
                 print(f"Batch {batch_num}/{len(train_dataloader)}")
             reconstructed_image = model(raw_pos, control)
 
-            loss = pixel_loss(reconstructed_image, image)
+            loss = (mse_loss(reconstructed_image, image) + dct_loss(reconstructed_image, image)) / 2
 
             optimizer.zero_grad()
             loss.backward()
