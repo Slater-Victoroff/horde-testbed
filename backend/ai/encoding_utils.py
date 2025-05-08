@@ -29,50 +29,53 @@ def kernel_expand(raw_pos, height, width, kernel_size=3):
 
     return torch.stack([expanded_x, expanded_y], dim=-1).view(-1, kernel_size ** 2, 2)
 
+def compute_helix_encoding(x, num_harmonics):
+    out = []
+    for i in range(1, num_harmonics + 1):
+        out += [torch.sin(i * x), torch.cos(i * x)]
+    return torch.cat(out, dim=-1)
 
-def compute_positional_encodings(raw_pos, height, width, num_encodings, exponential=False):
-    """
-    Generate positional encodings for the given raw positions.
-    :param raw_pos: Tensor of shape [..., 2] containing x and y coordinates in the last axis.
-    :param height: Height of the image.
-    :param width: Width of the image.
-    :param num_encodings: Number of positional encoding channels to generate.
-    :return: Tensor of shape [..., num_encodings] containing positional encodings.
-    """
-    x_coords = torch.clamp(raw_pos[..., 0:1], 0, width - 1) / width  # Clamp and normalize x-coordinates
-    y_coords = torch.clamp(raw_pos[..., 1:2], 0, height - 1) / height  # Clamp and normalize y-coordinates
 
-    encodings = [x_coords, y_coords]
-    
-    # Generate additional sinusoidal encodings
-    for i in range(1, (num_encodings - 2) // 2 + 1):
-        if exponential:
-            encodings.extend([
-                torch.sin(2 * torch.pi * (2 ** i) * x_coords),
-                torch.sin(2 * torch.pi * (2 ** i) * y_coords)
-            ])
-        else:
-            encodings.extend([
-                torch.sin(2 * torch.pi * i * x_coords),
-                torch.sin(2 * torch.pi * i * y_coords)
-            ])
+def compute_spiral_encoding(x, num_harmonics):
+    out = []
+    for i in range(1, num_harmonics + 1):
+        out += [torch.sin(i * x) / i, torch.cos(i * x) / i]
+    return torch.cat(out, dim=-1)
 
-    # If num_encodings is odd, add one more cosine term
-    if len(encodings) < num_encodings:
-        for i in range(1, (num_encodings - len(encodings)) // 2 + 1):
-            if exponential:
-                encodings.extend([
-                    torch.cos(2 * torch.pi * (2 ** i) * x_coords),
-                    torch.cos(2 * torch.pi * (2 ** i) * y_coords)
-                ])
-            else:
-                encodings.extend([
-                    torch.cos(2 * torch.pi * i * x_coords),
-                    torch.cos(2 * torch.pi * i * y_coords)
-                ])
 
-    positional_encodings = torch.cat(encodings[:num_encodings], dim=-1)
-    return positional_encodings
+def compute_sinusoidal_encoding(coords, num_harmonics):
+    encodings = []
+    for i in range(1, num_harmonics + 1):
+        encodings += [torch.sin(2 * torch.pi * i * coords), torch.cos(2 * torch.pi * i * coords)]
+    return torch.cat(encodings, dim=-1)
+
+
+def compute_targeted_encodings(x, target_dim, scheme="spiral", norm_2pi=True, include_norm=False, include_raw=False):
+    _, N = x.shape
+    encodings = []
+
+    if include_raw:
+        encodings.append(x)
+
+    if norm_2pi:
+        x = x * 2 * torch.pi
+        if include_norm:
+            encodings.append(x)
+
+    if scheme in ["helix", "spiral", "sinusoidal"]:
+        num_harmonics = ((target_dim - (N if include_raw else 0)) // 2) + 1
+        encoding_fn = {
+            "helix": compute_helix_encoding,
+            "spiral": compute_spiral_encoding,
+            "sinusoidal": compute_sinusoidal_encoding,
+        }[scheme]
+        encodings.append(encoding_fn(x, num_harmonics=num_harmonics))
+    elif scheme is None:
+        encodings.append(torch.zeros(x.shape[0], target_dim, device=x.device))
+    else:
+        raise ValueError(f"Unknown encoding scheme: {scheme}")
+
+    return torch.cat(encodings, dim=-1)[:, :target_dim]
 
 
 class SineLayer(nn.Module):

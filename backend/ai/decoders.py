@@ -1,37 +1,36 @@
 import torch
 import torch.nn as nn
 
-from utils import SineLayer, Tanh01, compute_positional_encodings, kernel_expand
+from encoding_utils import SineLayer, Tanh01, kernel_expand, compute_targeted_encodings
 
 class VFXSpiralNetDecoder(nn.Module):
     def __init__(
             self,
             latent_dim=4,
-            pos_channels=6,
-            control_channels=2,
+            pos_channels=8,
+            spiral_time_channels=8,
+            spiral_pos_channels=16,
             output_channels=4,
             hidden_dim=64,
-            prefilm_dims=16,
+            prefilm_dims=32,
         ):
         super().__init__()
         self.pos_channels = pos_channels
+        self.spiral_time_channels = spiral_time_channels
+        self.spiral_pos_channels = spiral_pos_channels
         input_dim = latent_dim + pos_channels
 
-        self.control_embed = nn.Sequential(
-            nn.Linear(control_channels, prefilm_dims),
-            nn.ReLU(),
-        )
         self.time_embed = nn.Sequential(
-            nn.Linear(6, prefilm_dims),  # time is a scalar (normalized frame index)
+            nn.Linear(self.spiral_time_channels, prefilm_dims),  # time is a scalar (normalized frame index)
             nn.ReLU(),
         )
 
         self.pos_embed = nn.Sequential(
-            nn.Linear(12, prefilm_dims),  # Don't use positional encodings in Film layer
+            nn.Linear(self.spiral_pos_channels, prefilm_dims),  # Don't use positional encodings in Film layer
             nn.ReLU(),
         )
 
-        self.film = nn.Linear(3 * prefilm_dims, hidden_dim * 2)
+        self.film = nn.Linear(2 * prefilm_dims, hidden_dim * 2)
         
         self.layers = nn.ModuleList([
             nn.Linear(input_dim, hidden_dim),
@@ -49,41 +48,41 @@ class VFXSpiralNetDecoder(nn.Module):
         latent_flat = latent.view(-1, C)  # Flatten latent to [H*W, C]
         linear_indices = raw_pos[:, 1] * W + raw_pos[:, 0]
         indexed_latent = latent_flat[linear_indices]
-        pos_enc = compute_positional_encodings(raw_pos, H, W, self.pos_channels)
+        x_coords = torch.clamp(raw_pos[..., 0:1], 0, W - 1) / W
+        y_coords = torch.clamp(raw_pos[..., 1:2], 0, H - 1) / H
+        norm_pos = torch.cat([x_coords, y_coords], dim=1)
+
+        pos_enc = compute_targeted_encodings(
+            norm_pos,
+            self.pos_channels,
+            scheme="sinusoidal",
+            include_raw=True,
+            norm_2pi=False,
+        )
+    
         main_input = torch.concat([indexed_latent, pos_enc], dim=1)  # [B, LATENT_IMAGE_CHANNELS + POS_CHANNELS]
 
-
-        control_feat = self.control_embed(control)
-        x = pos_enc[:, 0:1]  # normalized x in [0, 1]
-        y = pos_enc[:, 1:2]  # normalized y in [0, 1]
-
-        # Scale to [0, 2π]
-        x = x * 2 * torch.pi
-        y = y * 2 * torch.pi
-
-        # Spiral-style position embedding
-        spiral_pos = torch.cat([
-            torch.sin(x), torch.cos(x),
-            torch.sin(2 * x), torch.cos(2 * x),
-            torch.sin(3 * x), torch.cos(3 * x),
-            torch.sin(y), torch.cos(y),
-            torch.sin(2 * y), torch.cos(2 * y),
-            torch.sin(3 * y), torch.cos(3 * y)
-        ], dim=-1)  # [B, 12]
+        spiral_pos = compute_targeted_encodings(
+            norm_pos,
+            self.spiral_pos_channels,
+            scheme="spiral",
+            norm_2pi=True,
+            include_norm=True,
+        )
 
         pos_feat = self.pos_embed(spiral_pos)
-        t = control[:, 0:1] * 2 * torch.pi  # map to [0, 2π]
 
-        # Spiral embedding: sin/cos for base cycle, sin/cos of harmonic for texture
-        spiral_time = torch.cat([
-            torch.sin(t), torch.cos(t),
-            torch.sin(2 * t), torch.cos(2 * t),
-            torch.sin(3 * t), torch.cos(3 * t)
-        ], dim=-1)  # [B, 6]
-
+        spiral_time = compute_targeted_encodings(
+            control[:, 0:1],
+            self.spiral_time_channels,
+            scheme="spiral",
+            include_raw=True,
+            norm_2pi=True,
+            include_norm=True,
+        )
         time_feat = self.time_embed(spiral_time)
 
-        film_input = torch.cat([control_feat, pos_feat, time_feat], dim=-1)  # [B, 3 * pref_dim]
+        film_input = torch.cat([pos_feat, time_feat], dim=-1)  # [B, 2 * pref_dim]
 
         outputs = main_input
         for i, layer in enumerate(self.layers):
@@ -142,7 +141,15 @@ class VFXNetContextDecoder(nn.Module):
         latent_flat = latent.view(-1, C)  # Flatten latent to [H*W, C]
         linear_indices = raw_pos[:, 1] * W + raw_pos[:, 0]
         indexed_latent = latent_flat[linear_indices]
-        pos_enc = compute_positional_encodings(raw_pos, H, W, self.pos_channels)
+        x_coords = torch.clamp(raw_pos[..., 0:1], 0, W - 1) / W
+        y_coords = torch.clamp(raw_pos[..., 1:2], 0, H - 1) / H
+
+        pos_enc = compute_targeted_encodings(
+            torch.cat(x_coords, y_coords, dim=1),
+            self.pos_channels,
+            True,
+            scheme="sinusoidal"
+        )
         x = torch.concat([indexed_latent, pos_enc], dim=1)  # [B, LATENT_IMAGE_CHANNELS + POS_CHANNELS]
 
 
@@ -211,7 +218,15 @@ class VFXNetPixelDecoder(nn.Module):
         latent_flat = latent.view(-1, C)
         linear_indices = raw_pos[:, 1] * W + raw_pos[:, 0]
         indexed_latent = latent_flat[linear_indices]
-        pos_enc = compute_positional_encodings(raw_pos, H, W, self.pos_channels)
+        x_coords = torch.clamp(raw_pos[..., 0:1], 0, W - 1) / W
+        y_coords = torch.clamp(raw_pos[..., 1:2], 0, H - 1) / H
+
+        pos_enc = compute_targeted_encodings(
+            torch.cat(x_coords, y_coords, dim=1),
+            self.pos_channels,
+            True,
+            scheme="sinusoidal"
+        )
         x = torch.cat([indexed_latent, pos_enc, control], dim=1)
 
         outputs = x
@@ -291,7 +306,15 @@ class VFXNetPatchDecoder(nn.Module):
         latent_flat = latent.view(-1, latent.shape[-1])
         linear_indices = expanded_pos[..., 1] * W + expanded_pos[..., 0]
         latent_values = latent_flat[linear_indices]
-        pos_enc = compute_positional_encodings(expanded_pos, H, W, self.pos_channels)
+        x_coords = torch.clamp(raw_pos[..., 0:1], 0, W - 1) / W
+        y_coords = torch.clamp(raw_pos[..., 1:2], 0, H - 1) / H
+
+        pos_enc = compute_targeted_encodings(
+            torch.cat(x_coords, y_coords, dim=1),
+            self.pos_channels,
+            True,
+            scheme="sinusoidal"
+        )
 
         control_expanded = control.unsqueeze(1).expand(-1, self.kernel_size ** 2, -1)
 

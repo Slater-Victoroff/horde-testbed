@@ -227,7 +227,6 @@ def generate_control_animation(model, control_tensor, gif_path, num_frames=50, c
     with torch.no_grad():
         for control in sampled_controls:
             reconstructed_rgb = model.full_image(control.unsqueeze(0))  # Pass control vector to model
-            print(f"Reconstructed RGB shape: {reconstructed_rgb.shape}")
             rgb_image = reconstructed_rgb.squeeze(0).cpu().numpy()  # [H, W, C]
             rgb_image = np.clip(rgb_image, 0, 1)
             rgb_image = rgb_image ** (1 / 2.2)

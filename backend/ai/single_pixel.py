@@ -3,19 +3,18 @@ from datetime import datetime
 
 import torch
 import torch.nn as nn
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from torch.utils.data import DataLoader, TensorDataset
 
 from decoders import VFXSpiralNetDecoder, VFXNetPixelDecoder
 from losses import DCTLoss
-from utils import compute_positional_encodings
 from make_shader import decoder_to_glsl, compare_decoder_and_shader, save_weights_to_exr
 from image_utils import load_images, save_images
 
 INPUT_IMAGE_CHANNELS = 4  # RGBA
 LATENT_IMAGE_CHANNELS = 4 # RGBA
-POS_CHANNELS = 6
+POS_CHANNELS = 8
 CONTROL_CHANNELS = 2
 
 
@@ -27,13 +26,11 @@ class VFXNet(nn.Module):
         self.width = width
         _x_coords = torch.arange(width).repeat(height, 1).view(-1, 1)
         _y_coords = torch.arange(height).repeat(width, 1).t().contiguous().view(-1, 1)
-        self.raw_pos = torch.cat([_x_coords, _y_coords], dim=1)  # [H*W, 2]
-        self.pos_enc = compute_positional_encodings(self.raw_pos, height, width, POS_CHANNELS)
+        self.raw_pos = torch.cat([_x_coords, _y_coords], dim=1)
 
         self.shared_latent = nn.Parameter(torch.randn(height, width, LATENT_IMAGE_CHANNELS))
         self.decoder = VFXSpiralNetDecoder()
         self.raw_pos = self.raw_pos.to(device)
-        self.pos_enc = self.pos_enc.to(device)
         self._initialize_weights()
 
     def _initialize_weights(self):
@@ -50,13 +47,12 @@ class VFXNet(nn.Module):
     def full_image(self, control):
         # Expand control to match the first dimension of self.raw_pos
         expanded_control = control.unsqueeze(1).expand(-1, self.raw_pos.size(0), -1).reshape(-1, control.size(-1))
-        print(f"Expanded control shape: {expanded_control.shape}")
         response = self.decoder(self.shared_latent, self.raw_pos, expanded_control)
         shaped_image = response.view(self.height, self.width, INPUT_IMAGE_CHANNELS)
         return shaped_image
 
 
-def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, save_every=5, perceptual_epoch=5, experiment_name=None):
+def train_vfx_model(image_dir, device='cuda', epochs=250, batch_size=8192, save_every=5, perceptual_epoch=5, experiment_name=None):
     # Load images and create tensors
     image_tensor, raw_pos, control_tensor, shape = load_images(image_dir, device)
     # print some stats to make sure these are correct
@@ -83,7 +79,7 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, save
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     train_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=0.0001)
+    scheduler = CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-5)
 
     for epoch in range(epochs):
         print(f"Epoch {epoch + 1}/{epochs}")
@@ -97,7 +93,7 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, save
                 print(f"Batch {batch_num}/{len(train_dataloader)}")
             reconstructed_image = model(raw_pos, control)
 
-            loss = (mse_loss(reconstructed_image, image) + dct_loss(reconstructed_image, image)) / 2
+            loss = (mse_loss(reconstructed_image, image) + dct_loss(reconstructed_image, image)) / 2.0
 
             optimizer.zero_grad()
             loss.backward()
