@@ -9,6 +9,7 @@ struct ModelMeta {
 };
 
 @group(0) @binding(5) var<uniform> modelMeta: ModelMeta;
+@group(0) @binding(6) var<storage, read> layerOffsets: array<u32>;
 
 struct VertexOut {
   @builtin(position) position : vec4<f32>,
@@ -16,13 +17,31 @@ struct VertexOut {
 };
 
 
-fn uv_to_texCoord(uv: vec2<f32>) -> vec2<i32> {
-    // latent is 128×240  (width × height)
-    let x = i32(uv.x * 128.0);
-    let y = i32(uv.y * 240.0);
-    return vec2<i32>(x, y);
+// ── 1) a simple 2D hash → [0,1) based on uv + time ────────────────────
+fn rand(p: vec2<f32>) -> f32 {
+    // these magic constants give a decent pseudo-random spread
+    return fract(sin(dot(p, vec2<f32>(12.9898, 78.233))) * 43758.5453);
 }
 
+
+fn uv_to_texCoord(uv: vec2<f32>) -> vec2<i32> {
+    // textureDimensions on a sampled texture_2d returns vec2<u32>
+    let dims: vec2<u32> = textureDimensions(latentTex);
+    return vec2<i32>(
+        i32(uv.x * f32(dims.x)),
+        i32(uv.y * f32(dims.y))
+    );
+}
+
+
+fn getWeightBase(layerIndex: u32) -> u32 {
+  return layerOffsets[layerIndex * 2u + 0u];
+}
+
+
+fn getBiasBase(layerIndex: u32) -> u32 {
+  return layerOffsets[layerIndex * 2u + 1u];
+}
 
 fn relu(x: f32) -> f32 { return max(x, 0.0); }
 
@@ -260,60 +279,91 @@ fn linear_64x4(input: array<f32, 64>, weight_offset: u32, bias_offset: u32) -> v
     return out;
 }
 
-
-const TIME_W_11_4  : u32 = (491520u >> 2u) + 11u *  8u +  4u;      // =122 972
-const FILM_W_90_33 : u32 = (494848u >> 2u) + 90u * 64u + 33u;      // =129 505
-const L2_W_17_42   : u32 = (531456u >> 2u) + 17u * 64u + 42u;      // =134 434
-
-const L0_W_0_0     : u32 = (528128u)          >> 2u;            // decoder.layers.0.weight[0,0]
-const L0_B_0       : u32 = (531200u)          >> 2u;            // decoder.layers.0.bias[0]
-const FILM_B_10    : u32 = (527656u)          >> 2u;            // decoder.film.bias[10]
-
-const L0_W_BASE : u32 = 528128u >> 2u;      // offset/4   (shape 64 × 12)
-const L0_B_BASE : u32 = 531200u >> 2u;      // offset/4   (shape 64)
-
-const TIME_W_BASE  : u32 = 491520u >> 2u;   // (32×8)
-const TIME_B_BASE  : u32 = 492544u >> 2u;   // (32)
-
-const POS_W_BASE   : u32 = 492672u >> 2u;   // (32×16)
-const POS_B_BASE   : u32 = 494720u >> 2u;   // (32)
-
-const FILM_W_BASE  : u32 = 494848u >> 2u;   // (128×64)
-const FILM_B_BASE  : u32 = 527616u >> 2u;   // (128)
-
-const L2_W_BASE : u32 = 531456u >> 2u;   // 132 864
-const L2_B_BASE : u32 = 547840u >> 2u;   // 136 960
-
-const L3_W_BASE : u32 = 548096 >> 2u;
-const L3_B_BASE : u32 = 564480 >> 2u;
-
-const L4_W_BASE : u32 = 564736 >> 2u;
-const L4_B_BASE : u32 = 565760 >> 2u;
-
+const TIME_LAYER : u32 = 0u;
+const POS_LAYER  : u32 = 2u;
+const FILM_LAYER : u32 = 4u;
+const L0_LAYER   : u32 = 6u;
+const L2_LAYER   : u32 = 8u;
+const L3_LAYER   : u32 = 10u;
+const L4_LAYER   : u32 = 12u;
+const roamAmp    : f32 = 0.4;
+const roamRange  : f32 = 0.2;
+const tau = 6.28318530718;
+const harmFreqs  : array<f32,3> = array<f32,3>( 1.0, 2.0, 3.0 );
+const harmOffs   : array<f32,3> = array<f32,3>( 0.50, 0.25, 0.50 );
+const harmSpans  : array<f32,3> = array<f32,3>( 0.30, 0.50, 0.40 );
 
 @fragment
 fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+    let timeNode = 0.27;
     let pos_enc: array<f32, 8> = get_pos_enc(uv);
     let spiral_pos = get_spiral_pos(uv);
-    let spiral_time = get_spiral_time(control.x);
+
+    let tCont : f32 = control.x;   // grows linearly, e.g. elapsed*roamSpeed
+
+    let oscillation : f32 = sin(tCont * tau) * (roamRange * 0.5);
+
+    let newTime : f32 = timeNode + oscillation;
+
+    let wrappedT : f32 = fract(newTime);
+
+    var dynEnc : array<f32,8> = get_spiral_time(wrappedT);
+    var staticEnc : array<f32, 8> = get_spiral_time(timeNode);
+
+    var enc : array<f32, 8>;
+    enc[0] = staticEnc[0];
+    enc[1] = staticEnc[1];
+    enc[2] = staticEnc[2];
+    enc[3] = staticEnc[3];
+    // let mid2 = fract( (control.x * 2.0) + 0.25 ); // map 0→½ into [¼,¾]
+    // then overwrite only slot 4/5:
+    // enc[4] = sin(2.0 * tau * mid2) / 2.0;
+    // enc[5] = cos(2.0 * tau * mid2) / 2.0;
+    // enc[6] = staticEnc[6];
+    // enc[7] = staticEnc[7];
+
+    for (var h = 1u; h < 3u; h = h + 1u) {
+        let freq    = harmFreqs[h];    // e.g. 2.0, 3.0
+        let center  = harmOffs[h];     // center of your mini‐loop
+        let width   = harmSpans[h];    // total span of mini‐loop
+
+        // 1) continuous phase for this harmonic
+        let phase   = tCont * freq;                // tCont from JS: elapsed*roamSpeed
+        // 2) sine‐wave in [-1,+1], then scale to [–width/2, +width/2]
+        let wobble  = sin(phase * tau) * (width * 0.5);
+        // 3) offset around center
+        let midT    = center + wobble;             // now lives in [center−w/2, center+w/2]
+        // 4) compute that harmonic’s sin/cos
+        let phi     = midT * tau * freq;
+        let idx     = 2u*h + 2u;                   // 4 for h=1, 6 for h=2
+
+        let baseSin = sin(phi) / freq;
+        let baseCos = cos(phi) / freq;
+        // small amplitude jitter in [0.9,1.1]
+        let aJitter = 1.0 + sin(tCont * tau * freq)*0.05;
+        enc[idx]   = baseSin * aJitter;
+        enc[idx+1] = baseCos * aJitter;
+        // enc[idx  ] = sin(phi) / freq;
+        // enc[idx+1] = cos(phi) / freq;
+    }
 
     let lat = textureLoad(latentTex, uv_to_texCoord(uv), 0);  // no 1.0-y flip!
 
     /* 3b. assemble 12-vector & run first linear */
     let main_in  = get_main_input(lat, pos_enc);
-    let trunk  = linear_12x64(main_in, L0_W_BASE, L0_B_BASE);
+    let trunk  = linear_12x64(main_in, getWeightBase(L0_LAYER), getBiasBase(L0_LAYER));
 
-    var time_embed  = linear_8x32(spiral_time, TIME_W_BASE, TIME_B_BASE);
+    var time_embed  = linear_8x32(enc, getWeightBase(TIME_LAYER), getBiasBase(TIME_LAYER));
     time_embed = relu_vec(time_embed);
 
-    var pos_embed  = linear_16x32(spiral_pos, POS_W_BASE, POS_B_BASE);
+    var pos_embed  = linear_16x32(spiral_pos, getWeightBase(POS_LAYER), getBiasBase(POS_LAYER));
     pos_embed = relu_vec(pos_embed);
 
     var film_in: array<f32, 64>;
     for (var i=0;i<32;i++){ film_in[i]     = pos_embed[i]; }
     for (var i=0;i<32;i++){ film_in[32+i]  = time_embed[i]; }
 
-    let film_out = linear_64x128(film_in, FILM_W_BASE, FILM_B_BASE);
+    let film_out = linear_64x128(film_in, getWeightBase(FILM_LAYER), getBiasBase(FILM_LAYER));
 
     var gamma: array<f32, 64>;
     var beta: array<f32, 64>;
@@ -325,13 +375,13 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     let modulated = apply_film(trunk, gamma, beta);
     let activated = gelu_vec(modulated);
 
-    let after2 = linear_64x64(activated, L2_W_BASE, L2_B_BASE);
+    let after2 = linear_64x64(activated, getWeightBase(L2_LAYER), getBiasBase(L2_LAYER));
     let activated2 = gelu_vec(after2);
 
-    let after3 = linear_64x64(activated2, L3_W_BASE, L3_B_BASE);
+    let after3 = linear_64x64(activated2, getWeightBase(L3_LAYER), getBiasBase(L3_LAYER));
     let activated3 = gelu_vec(after3);
 
-    let raw_output = linear_64x4(activated3, L4_W_BASE, L4_B_BASE);
+    let raw_output = linear_64x4(activated3, getWeightBase(L4_LAYER), getBiasBase(L4_LAYER));
 
     let final_color = sigmoid_vec4(raw_output);
 

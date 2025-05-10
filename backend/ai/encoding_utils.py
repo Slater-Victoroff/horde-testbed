@@ -29,12 +29,6 @@ def kernel_expand(raw_pos, height, width, kernel_size=3):
 
     return torch.stack([expanded_x, expanded_y], dim=-1).view(-1, kernel_size ** 2, 2)
 
-def compute_helix_encoding(x, num_harmonics):
-    out = []
-    for i in range(1, num_harmonics + 1):
-        out += [torch.sin(i * x), torch.cos(i * x)]
-    return torch.cat(out, dim=-1)
-
 
 def compute_spiral_encoding(x, num_harmonics):
     out = []
@@ -46,11 +40,29 @@ def compute_spiral_encoding(x, num_harmonics):
 def compute_sinusoidal_encoding(coords, num_harmonics):
     encodings = []
     for i in range(1, num_harmonics + 1):
-        encodings += [torch.sin(2 * torch.pi * i * coords), torch.cos(2 * torch.pi * i * coords)]
+        encodings += [torch.sin(i * coords), torch.cos(i * coords)]
     return torch.cat(encodings, dim=-1)
 
 
-def compute_targeted_encodings(x, target_dim, scheme="spiral", norm_2pi=True, include_norm=False, include_raw=False):
+def compute_linear_encoding(x, target_dim):
+    return x.repeat(1, target_dim // x.shape[-1])[:, :target_dim]
+
+
+def compute_polynomial_encoding(x, max_degree):
+    out = []
+    for i in range(1, max_degree + 1):
+        out.append(x ** i)
+    return torch.cat(out, dim=-1)
+
+
+def compute_gaussian_encoding(x, target_dim, std=10.0, seed=42):
+    generator = torch.Generator(device=x.device).manual_seed(seed)
+    B = torch.randn(x.shape[1], target_dim // 2, generator=generator, device=x.device) * std
+    x_proj = 2 * torch.pi * x @ B  # [B, F]
+    return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
+
+
+def compute_targeted_encodings(x, target_dim, scheme="spiral", norm_2pi=True, include_norm=False, include_raw=False, seed=42):
     _, N = x.shape
     encodings = []
 
@@ -62,14 +74,20 @@ def compute_targeted_encodings(x, target_dim, scheme="spiral", norm_2pi=True, in
         if include_norm:
             encodings.append(x)
 
-    if scheme in ["helix", "spiral", "sinusoidal"]:
+    if scheme in ["spiral", "sinusoidal"]:
         num_harmonics = ((target_dim - (N if include_raw else 0)) // 2) + 1
         encoding_fn = {
-            "helix": compute_helix_encoding,
             "spiral": compute_spiral_encoding,
             "sinusoidal": compute_sinusoidal_encoding,
         }[scheme]
         encodings.append(encoding_fn(x, num_harmonics=num_harmonics))
+    elif scheme == "gaussian":
+        encodings.append(compute_gaussian_encoding(x, target_dim, seed=seed))
+    elif scheme == "linear":
+        encodings.append(compute_linear_encoding(x, target_dim))
+    elif scheme == "polynomial":
+        deg = target_dim // x.shape[-1]
+        encodings.append(compute_polynomial_encoding(x, deg))
     elif scheme is None:
         encodings.append(torch.zeros(x.shape[0], target_dim, device=x.device))
     else:

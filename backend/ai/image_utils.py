@@ -148,9 +148,10 @@ def load_images(image_dir, device, input_image_channels=4, control_channels=2):
     raw_pos = raw_pos.to(device)
     return image_tensor, raw_pos, control, shape
 
+
 def save_images(model, control_tensor, epoch, n=5):
     # Create directory structure
-    base_dir = "debug_outputs"
+    base_dir = "final_data"
     epoch_dir = os.path.join(base_dir, model.experiment_name, f"epoch_{epoch}")
     os.makedirs(epoch_dir, exist_ok=True)
 
@@ -188,8 +189,9 @@ def save_images(model, control_tensor, epoch, n=5):
         # Generate and save a GIF from evenly sampled control vectors
         gif_path = os.path.join(epoch_dir, "control_animation.gif")
         print(f"Control tensor shape: {control_tensor.shape}")
-        generate_control_animation(model, control_tensor, gif_path)
+        reconstructed_batch, sampled_controls = generate_control_animation(model, control_tensor, gif_path)
         print(f"Control animation GIF saved to {gif_path}")
+    return reconstructed_batch, sampled_controls
 
 
 def generate_control_animation(model, control_tensor, gif_path, num_frames=50, control_axis=None, fixed_values=None):
@@ -224,10 +226,14 @@ def generate_control_animation(model, control_tensor, gif_path, num_frames=50, c
     print(f"Sampled control tensor shape: {sampled_controls.shape}")
     # Generate frames
     frames = []
+    outputs = []
     with torch.no_grad():
         for control in sampled_controls:
             reconstructed_rgb = model.full_image(control.unsqueeze(0))  # Pass control vector to model
+            outputs.append(reconstructed_rgb)
             rgb_image = reconstructed_rgb.squeeze(0).cpu().numpy()  # [H, W, C]
+
+            # Gamma correction
             rgb_image = np.clip(rgb_image, 0, 1)
             rgb_image = rgb_image ** (1 / 2.2)
             
@@ -240,6 +246,7 @@ def generate_control_animation(model, control_tensor, gif_path, num_frames=50, c
 
     iio.imwrite(gif_path, frames)
     print(f"Control animation GIF saved to {gif_path}")
+    return torch.stack(outputs), sampled_controls
 
 def generate_control_grid_animation(model, control_tensor, gif_path, num_frames=50, axis_1=0, axis_2=1, axis_2_values=None):
     """

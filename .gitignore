@@ -34,6 +34,7 @@ venv/
 # Ignore specific local folders
 static/
 backend/ai/debug_outputs/
+backend/ai/final_data/
 certbot/
 
 # Ignore large temporary data

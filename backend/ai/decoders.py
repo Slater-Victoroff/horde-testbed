@@ -4,92 +4,141 @@ import torch.nn as nn
 from encoding_utils import SineLayer, Tanh01, kernel_expand, compute_targeted_encodings
 
 class VFXSpiralNetDecoder(nn.Module):
-    def __init__(
-            self,
-            latent_dim=4,
-            pos_channels=8,
-            spiral_time_channels=8,
-            spiral_pos_channels=16,
-            output_channels=4,
-            hidden_dim=64,
-            prefilm_dims=32,
-        ):
+    def __init__(self, **kwargs):
+        defaults = {
+            "latent_dim": 4,
+            "trunk_pos_channels": 0,
+            "trunk_pos_scheme": "sinusoidal",
+            "trunk_pos_include_raw": True,
+            "trunk_pos_include_norm": True,
+            "trunk_time_channels": 0,
+            "trunk_time_scheme": "sinusoidal",
+            "trunk_time_include_raw": True,
+            "trunk_time_include_norm": True,
+            "film_time_channels": 8,
+            "film_time_scheme": "spiral",
+            "film_time_include_raw": True,
+            "film_time_include_norm": True,
+            "film_pos_channels": 16,
+            "film_pos_scheme": "spiral",
+            "film_pos_include_raw": True,
+            "film_pos_include_norm": True,
+            "output_channels": 4,
+            "hidden_dim": 64,
+            "prefilm_dims": 32,
+            "apply_film": [1],
+        }
+        defaults.update(kwargs)
+        for key, value in defaults.items():
+            setattr(self, key, value)
+
         super().__init__()
-        self.pos_channels = pos_channels
-        self.spiral_time_channels = spiral_time_channels
-        self.spiral_pos_channels = spiral_pos_channels
-        input_dim = latent_dim + pos_channels
+        input_dim = self.latent_dim + self.trunk_pos_channels + self.trunk_time_channels
 
-        self.time_embed = nn.Sequential(
-            nn.Linear(self.spiral_time_channels, prefilm_dims),  # time is a scalar (normalized frame index)
-            nn.ReLU(),
-        )
+        if self.prefilm_dims > 0:
+            if self.film_time_channels > 0:
+                self.time_embed = nn.Sequential(
+                    nn.Linear(self.film_time_channels, self.prefilm_dims),
+                    nn.ReLU(),
+                )
 
-        self.pos_embed = nn.Sequential(
-            nn.Linear(self.spiral_pos_channels, prefilm_dims),  # Don't use positional encodings in Film layer
-            nn.ReLU(),
-        )
+            if self.film_pos_channels > 0:
+                self.pos_embed = nn.Sequential(
+                    nn.Linear(self.film_pos_channels, self.prefilm_dims),
+                    nn.ReLU(),
+                )
 
-        self.film = nn.Linear(2 * prefilm_dims, hidden_dim * 2)
-        
+            if self.film_time_channels > 0 or self.film_pos_channels > 0:
+                prefilm_input_dim = (self.film_time_channels > 0) * self.prefilm_dims + (self.film_pos_channels > 0) * self.prefilm_dims
+                self.film = nn.Linear(prefilm_input_dim, self.hidden_dim * 2)
+        else:
+            if self.film_time_channels > 0 or self.film_pos_channels > 0:
+                prefilm_input_dim = self.film_time_channels + self.film_pos_channels
+                self.film = nn.Linear(prefilm_input_dim, self.hidden_dim * 2)
+
         self.layers = nn.ModuleList([
-            nn.Linear(input_dim, hidden_dim),
+            nn.Linear(input_dim, self.hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, output_channels),
+            nn.Linear(self.hidden_dim, self.output_channels),
             nn.Sigmoid()
         ])
-    
+
     def forward(self, latent, raw_pos, control, return_hidden_layer=None):
         H, W, C = latent.shape
-        latent_flat = latent.view(-1, C)  # Flatten latent to [H*W, C]
+        latent_flat = latent.view(-1, C)
         linear_indices = raw_pos[:, 1] * W + raw_pos[:, 0]
         indexed_latent = latent_flat[linear_indices]
         x_coords = torch.clamp(raw_pos[..., 0:1], 0, W - 1) / W
         y_coords = torch.clamp(raw_pos[..., 1:2], 0, H - 1) / H
         norm_pos = torch.cat([x_coords, y_coords], dim=1)
 
-        pos_enc = compute_targeted_encodings(
-            norm_pos,
-            self.pos_channels,
-            scheme="sinusoidal",
-            include_raw=True,
-            norm_2pi=False,
-        )
-    
-        main_input = torch.concat([indexed_latent, pos_enc], dim=1)  # [B, LATENT_IMAGE_CHANNELS + POS_CHANNELS]
+        main_input = [indexed_latent]
+        if self.trunk_pos_channels > 0:
+            pos_enc = compute_targeted_encodings(
+                norm_pos,
+                self.trunk_pos_channels,
+                scheme=self.trunk_pos_scheme,
+                include_raw=self.trunk_pos_include_raw,
+                norm_2pi=True,
+                include_norm=self.trunk_pos_include_norm,
+            )
+            main_input.append(pos_enc)
 
-        spiral_pos = compute_targeted_encodings(
-            norm_pos,
-            self.spiral_pos_channels,
-            scheme="spiral",
-            norm_2pi=True,
-            include_norm=True,
-        )
+        if self.trunk_time_channels > 0:
+            trunk_time = compute_targeted_encodings(
+                control[:, 0:1],
+                self.trunk_time_channels,
+                scheme=self.trunk_time_scheme,
+                include_raw=self.trunk_time_include_raw,
+                norm_2pi=True,
+                include_norm=self.trunk_time_include_norm,
+            )
+            main_input.append(trunk_time)
 
-        pos_feat = self.pos_embed(spiral_pos)
+        main_input = torch.cat(main_input, dim=1)
 
-        spiral_time = compute_targeted_encodings(
-            control[:, 0:1],
-            self.spiral_time_channels,
-            scheme="spiral",
-            include_raw=True,
-            norm_2pi=True,
-            include_norm=True,
-        )
-        time_feat = self.time_embed(spiral_time)
+        film_input = []
+        if self.film_pos_channels > 0:
+            film_pos = compute_targeted_encodings(
+                norm_pos,
+                self.film_pos_channels,
+                scheme=self.film_pos_scheme,
+                include_raw=self.film_pos_include_raw,
+                norm_2pi=True,
+                include_norm=self.film_pos_include_norm,
+            )
+            if self.prefilm_dims > 0:
+                film_pos = self.pos_embed(film_pos)
+            film_input.append(film_pos)
 
-        film_input = torch.cat([pos_feat, time_feat], dim=-1)  # [B, 2 * pref_dim]
+        if self.film_time_channels > 0:
+            film_time = compute_targeted_encodings(
+                control[:, 0:1],
+                self.film_time_channels,
+                scheme=self.film_time_scheme,
+                include_raw=self.film_time_include_raw,
+                norm_2pi=True,
+                include_norm=self.film_time_include_norm,
+            )
+            if self.prefilm_dims > 0:
+                film_time = self.time_embed(film_time)
+            film_input.append(film_time)
+
+        if film_input:
+            film_input = torch.cat(film_input, dim=-1)
+        else:
+            film_input = None
 
         outputs = main_input
         for i, layer in enumerate(self.layers):
-            if i == 1:  # First layer, apply film
+            if i in self.apply_film and film_input is not None:
                 gamma, beta = self.film(film_input).chunk(2, dim=-1)
                 outputs = layer((gamma * outputs) + beta)
-            else:    
+            else:
                 outputs = layer(outputs)
             if return_hidden_layer is not None and i == return_hidden_layer:
                 return outputs

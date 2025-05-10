@@ -53,11 +53,10 @@ const controlBuffer = device.createBuffer({
     size: controlData.byteLength,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
 });
-
 // Load combined model file and manifest
 const [manifest, rawBuffer] = await Promise.all([
-    fetch("model_manifest.json").then(r => r.json()),
-    fetch("model_weights.bin").then(r => r.arrayBuffer())
+    fetch(`model_manifest.json?cacheBust=${Date.now()}`).then(r => r.json()),
+    fetch(`model_weights.bin?cacheBust=${Date.now()}`).then(r => r.arrayBuffer())
 ]);
 
 const floatBuffer = new Float32Array(rawBuffer);
@@ -104,24 +103,25 @@ const latentData = floatBuffer.subarray(latentOffset, latentOffset + latentLengt
 const latentWidth = latentMeta.shape[1]; // 128
 const latentHeight = latentMeta.shape[0]; // 240
 
-const trunk8 = computeTrunkAt(
-    Math.floor(latentWidth/2),            // x
-    Math.floor(latentHeight/2),           // y
-    0.25,                            // t (unused for trunk-only)
-    {
-        floatBuffer,
-        manifest: manifest.layers,
-        latentData,
-        width: latentWidth,
-        height: latentHeight
-    }
-  );
-  
-console.log("cpu trunk[0..7] =", trunk8);
-
+const numLayers = manifest.layers.length - 1;
 const modelLayers = manifest.layers.filter(layer => layer.name !== "shared_latent");
 const modelStart = Math.min(...modelLayers.map(l => l.offset / 4));
 const modelEnd   = Math.max(...modelLayers.map(l => l.offset / 4 + l.size));
+
+const offsetData = new Uint32Array(numLayers * 2);
+for (let i = 0; i < modelLayers.length; i++) {
+    const lay = modelLayers[i];
+    // weight comes first in the manifest for each layer
+    offsetData[i*2 + 0] = lay.offset   / 4;           // weightBase
+    offsetData[i*2 + 1] = (lay.offset + lay.size*4) / 4; // biasBase
+}
+
+const offsetBuf = device.createBuffer({
+    size: offsetData.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+});
+device.queue.writeBuffer(offsetBuf, 0, offsetData);
+
 console.log('modelStart', modelStart);
 console.log('modelEnd', modelEnd);
 
@@ -186,6 +186,7 @@ const bindGroupLayout = device.createBindGroupLayout({
         { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
         { binding: 4, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "storage" } },
         { binding: 5, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+        { binding: 6, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
     ],
 });
 
@@ -223,6 +224,7 @@ const bindGroup = device.createBindGroup({
         { binding: 3, resource: { buffer: modelBuffer } },
         { binding: 4, resource: { buffer: debugBuffer } },
         { binding: 5, resource: { buffer: metaBuf } },
+        { binding: 6, resource: { buffer: offsetBuf } },
     ],
 });
 
@@ -233,22 +235,38 @@ canvas.addEventListener("mousemove", (event) => {
     mousePosition.y = -(((event.clientY - rect.top) / rect.height) * 2 - 1);
 });
 
+const idleBase    = 0.42;
+const roamSpeed     = 0.02;
+const flickerAmp  = 0.75;
+const flickerInterval = 0.8;  
 let startTime = performance.now();
+
+let prevFlickTarget = 0;
+let nextFlickTarget = (Math.random()*2 - 1) * flickerAmp;
+let flickerTime0    = 0;
 
 async function frame() {
     const currentTime = performance.now();
     const elapsedTime = (currentTime - startTime) / 1000; // Convert to seconds
-    const loopedTime = (elapsedTime % 3) / 3;
-    controlData[0] = loopedTime;
-    controlData[1] = 0.0;
+    const circleTime = (elapsedTime % 10.0) / 10.0;
+
+    const baseT = (idleBase + elapsedTime * roamSpeed) % 1.0;
+    if (elapsedTime - flickerTime0 >= flickerInterval) {
+        flickerTime0    += flickerInterval;
+        prevFlickTarget  = nextFlickTarget;
+        nextFlickTarget  = (Math.random()*2 - 1) * flickerAmp;
+    }
+    const phase      = ((elapsedTime - flickerTime0) / flickerInterval);
+    const flickerVal = prevFlickTarget * (1-phase) + nextFlickTarget * phase;
+      
+    controlData[0] = circleTime;
+    controlData[1] = flickerVal;
     controlData[2] = 0.0;
     controlData[3] = 0.0;
     device.queue.writeBuffer(controlBuffer, 0, controlData);
 
-    const pxWidth = 128;
-    const pxHeight = 240;
-    const sizeX = pxWidth  * 2.0 / canvas.width;
-    const sizeY = pxHeight * 2.0 / canvas.height;
+    const sizeX = latentWidth  * 2.0 / canvas.width;
+    const sizeY = latentHeight * 2.0 / canvas.height;
     
     // ──   shift the quad up by half its height   ─────────────────────────────────
     // anchorY = +½ * sizeY  → mouse sits on the bottom edge
@@ -292,7 +310,7 @@ async function frame() {
 
     await readback.mapAsync(GPUMapMode.READ);
     const data = new Float32Array(readback.getMappedRange());
-    console.log("WGSL debug_data:", Array.from(data));
+    // console.log("WGSL debug_data:", Array.from(data));
     requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);

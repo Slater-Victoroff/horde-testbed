@@ -178,46 +178,46 @@ def inspect_film(
 # --- Main ----------------------------------------------------------------
 if __name__ == "__main__":
     # 1) Export weights + manifest
-    # convert_to_webgpu("spiral-spiral-baseline", 34)
+    convert_to_webgpu("spiral-spiral-baseline")
 
-    # 2) Inspect a few weights
-    manifest, flat = load_flat_weights(
-        os.path.join(RESULTS_DIR, "model_weights.bin"),
-        os.path.join(RESULTS_DIR, "model_manifest.json")
-    )
-    # print("Py decoder.layers.0.weight[0,0] =", get_weight(manifest, flat, "decoder.layers.0.weight", 0, 0))
+    # # 2) Inspect a few weights
+    # manifest, flat = load_flat_weights(
+    #     os.path.join(RESULTS_DIR, "model_weights.bin"),
+    #     os.path.join(RESULTS_DIR, "model_manifest.json")
+    # )
+    # # print("Py decoder.layers.0.weight[0,0] =", get_weight(manifest, flat, "decoder.layers.0.weight", 0, 0))
 
-    # 3) Pixel debug
-    H, W = 240, 128
-    ckpt = os.path.join(
-        resolve_experiment_subfolder("spiral-spiral-baseline", 34),
-        "model_weights.pth"
-    )
-    model = load_vfxnet(H, W, ckpt, device="cpu")
-    u, v = 0.44, 0.63
-    x = int((u * W))               # texCoord.x in WGSL
-    y = int((v * H))               # texCoord.y in WGSL
-    t = 0.69
+    # # 3) Pixel debug
+    # H, W = 240, 128
+    # ckpt = os.path.join(
+    #     resolve_experiment_subfolder("spiral-spiral-baseline", 34),
+    #     "model_weights.pth"
+    # )
+    # model = load_vfxnet(H, W, ckpt, device="cpu")
+    # u, v = 0.44, 0.63
+    # x = int((u * W))               # texCoord.x in WGSL
+    # y = int((v * H))               # texCoord.y in WGSL
+    # t = 0.69
 
-    payload = inspect_film(model, x=x, y=y, t=t)
-    print("pos_feat[0..7] :", payload["pos_feat"][:8])
-    print("time_feat[0..7]:", payload["time_feat"][:8])
-    print("gamma    [0..7] :", payload["gamma"])
-    print("beta     [0..7] :", payload["beta"])
+    # payload = inspect_film(model, x=x, y=y, t=t)
+    # print("pos_feat[0..7] :", payload["pos_feat"][:8])
+    # print("time_feat[0..7]:", payload["time_feat"][:8])
+    # print("gamma    [0..7] :", payload["gamma"])
+    # print("beta     [0..7] :", payload["beta"])
 
-    trunk = debug_pixel(model, x, y, t, layer_idx=0)
-    gamma_tensor = torch.tensor(payload["gamma"], device=trunk.device)
-    beta_tensor = torch.tensor(payload["beta"], device=trunk.device)
-    preGelu = gamma_tensor * trunk + beta_tensor
-    compute_test = debug_pixel(model, x, y, t)
-    print("trunk   =", trunk.numpy())
-    print("preGelu  :", preGelu.numpy())
-    print("compute_test:", compute_test.numpy())
+    # trunk = debug_pixel(model, x, y, t, layer_idx=0)
+    # gamma_tensor = torch.tensor(payload["gamma"], device=trunk.device)
+    # beta_tensor = torch.tensor(payload["beta"], device=trunk.device)
+    # preGelu = gamma_tensor * trunk + beta_tensor
+    # compute_test = debug_pixel(model, x, y, t)
+    # print("trunk   =", trunk.numpy())
+    # print("preGelu  :", preGelu.numpy())
+    # print("compute_test:", compute_test.numpy())
 
-    # x, y, t = W//2, H//2, 0.25
-    # trunk = debug_pixel(model, x, y, t, layer_idx=1)
-    # final = debug_pixel(model, x, y, t)
-    # print("trunk[:8]   =", trunk[:8].numpy())
-    # print("final (RGBA)=", final[:4].numpy())
-    # save_debug(x, y, t, trunk, "trunk")
-    # save_debug(x, y, t, final, "final")
+    # # x, y, t = W//2, H//2, 0.25
+    # # trunk = debug_pixel(model, x, y, t, layer_idx=1)
+    # # final = debug_pixel(model, x, y, t)
+    # # print("trunk[:8]   =", trunk[:8].numpy())
+    # # print("final (RGBA)=", final[:4].numpy())
+    # # save_debug(x, y, t, trunk, "trunk")
+    # # save_debug(x, y, t, final, "final")
