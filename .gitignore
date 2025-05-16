@@ -36,6 +36,7 @@ static/
 backend/ai/debug_outputs/
 backend/ai/final_data/
 backend/ai/ref_data/
+backend/ai/gauge_dir
 certbot/
 
 # Ignore large temporary data
