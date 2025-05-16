@@ -27,6 +27,20 @@ def rotate_phase(sinφ, cosφ, ω, dt):
     return sin_next, cos_next
 
 
+class SafeBoundedOutput(nn.Module):
+    def __init__(self, min_val=0.0, max_val=1.0):
+        super().__init__()
+        self.register_buffer('min_val', torch.tensor(min_val))
+        self.register_buffer('max_val', torch.tensor(max_val))
+
+    def forward(self, x):
+        # Smooth nonlinearity that preserves gradient structure
+        x = torch.tanh(x)
+        # Scale + shift to [min_val, max_val]
+        x = 0.5 * (x + 1.0)  # to [0,1]
+        return torch.clamp(x, self.min_val, self.max_val)
+
+
 class DrillNet(nn.Module):
     def __init__(self, conserved_cycles=3, nc_terms=3, hidden_dim=64, input_channels=4):
         super().__init__()
@@ -45,17 +59,11 @@ class DrillNet(nn.Module):
             nn.Linear(latent_channels, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, input_channels),
-            nn.Sigmoid(),  # TODO: replace. This breaks divergence free, but I still need 0-1 range
+            SafeBoundedOutput(min_val=0.0, max_val=1.0)
         )
     
     def decode(self, packed_latent, pos, time):
-        ω, sinφ, cosφ, noncon = self._split_latent(packed_latent)
-        
-        # Concatenate the unpacked components with the position and time
-        x_in = torch.cat([ω, sinφ, cosφ, noncon, pos, time], dim=-1)
-        
-        # Pass through the decoder
-        return self.decoder(x_in)
+        return self.decoder(packed_latent)
 
     def _split_latent(self, z):
         idx   = 0
@@ -72,14 +80,14 @@ class DrillNet(nn.Module):
     def _pack_latent(self, ω, sinφ, cosφ, noncon):
         return torch.cat([ω, sinφ, cosφ, noncon], dim=1)
 
-    def advance_latent(self, z, dt):
+    def increment_latent_time(self, latent, dt, pos, time):
         """
         z  : (B, latent_dim)   current latent
         dt : float or tensor   time step
         returns new latent (B, latent_dim)
         """
-        ω, sinφ, cosφ, noncon = self._split_latent(z)
-        dt = torch.as_tensor(dt, device=z.device).view(-1, 1)  # broadcast
+        ω, sinφ, cosφ, noncon = self._split_latent(latent)
+        dt = torch.as_tensor(dt, device=latent.device).view(-1, 1)  # broadcast
         sinφ_next, cosφ_next = rotate_phase(sinφ, cosφ, ω, dt)
         noncon_next = (noncon + dt) % 1.0
         return self._pack_latent(ω, sinφ_next, cosφ_next, noncon_next)
@@ -97,6 +105,155 @@ class DrillNet(nn.Module):
         return self.decoder(latent), latent
 
 
+class DrillNet2(nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.latent_dim = kwargs.get('latent_dim', 12)
+        self._num_dims = 3  # x, y, t
+        self.k = kwargs.get('num_harmonics', 3)
+        self.g = kwargs.get('gauge_dim', 2 * self._num_dims)  # A φ
+
+        self.ω_tensor = nn.ParameterDict({
+            axis: nn.Parameter(torch.tensor([2**i for i in range(self.k)], dtype=torch.float32))
+            for axis in ['x', 'y', 't']
+        })
+
+        self.hidden_dim = kwargs.get('hidden_dim', 64)
+        self.input_channels = kwargs.get('input_channels', 4)
+        self.decoder_config = kwargs
+
+        self.fiber_encoder = nn.Sequential(
+            nn.Linear(self.input_channels + self._num_dims, self.hidden_dim),
+            nn.GELU(),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.GELU(),
+            nn.Linear(self.hidden_dim, self.k * self.g),
+            nn.GELU(),
+        )
+
+        # self.Aφ_decoder = nn.Sequential(
+        #     nn.Linear(self.latent_dim, self.k * self.g),
+        # )
+
+        # This is our gluing function across the Aφ fiber bundles
+        self.Aφ_incrementers = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(self.g + 2 * self._num_dims, self.hidden_dim),
+                nn.GELU(),
+                nn.Linear(self.hidden_dim, self.g)
+            )
+            for _ in range(self._num_dims)
+        ])
+
+        # # Create one ψ-decoder per Aωφ field (9 in total: 3 for x, y, t * 3)
+        # self.ψ_decoders = nn.ModuleList([
+        #     nn.Sequential(
+        #         nn.Linear(9, 3),  # Each ψ-decoder processes 9 inputs to produce 3 outputs
+        #     )
+        #     for _ in range(self.k)
+        # ])
+
+        self.image_decoder = nn.Sequential(
+            # Each harmonic ultimately encodes A * sinφ, A * cosφ, then plus raw toroidal coords
+            nn.Linear(self.k * (2 * self._num_dims) + self._num_dims, self.hidden_dim),
+            nn.GELU(),
+            nn.Linear(self.hidden_dim, self.input_channels),
+            SafeBoundedOutput(min_val=0.0, max_val=1.0)
+        )
+
+    def encode_raw(self, color, pos, time):
+        x_in = torch.cat([color, pos, time], dim=-1)
+        return self.encoder(x_in)
+
+    def transport_bundles(self, bundles, dx, dy, dt, x, y, t):
+        """
+        Transport (advance) the latent bundles using the dx, dy, dt offsets.
+        Performs structured cyclic φ updates and learned amplitude increments.
+        """
+
+        dx = dx.unsqueeze(-1) if dx.dim() == 1 else dx
+        dy = dy.unsqueeze(-1) if dy.dim() == 1 else dy
+        dt = dt.unsqueeze(-1) if dt.dim() == 1 else dt
+
+        delta_pos = [dx, dy, dt]
+        axes = ['x', 'y', 't']
+        dim_bundles = torch.chunk(bundles, chunks=self._num_dims, dim=-1)
+
+        new_bundles = []
+        for i, (bundle, incrementer) in enumerate(zip(dim_bundles, self.Aφ_incrementers)):
+            d_axis = delta_pos[i]
+            d_others = torch.cat([delta_pos[j] for j in range(3) if j != i], dim=-1)
+            norm_other = torch.norm(d_others, dim=-1, keepdim=True)
+
+            # Learned residual updates (ΔA, Δφ_residual)
+            x_in = torch.cat([bundle, dx, dy, dt, x, y, t], dim=-1)
+            delta = incrementer(x_in)  # shape (B, g)
+
+            updated_bundle = bundle.clone()
+
+            for h in range(self.k):
+                idx = h * 2  # (A, φ) per harmonic
+                A, φ = bundle[:, idx:idx+1], bundle[:, idx+1:idx+2]
+                dA, dφ_residual = delta[:, idx:idx+1], delta[:, idx+1:idx+2]
+
+                ω_axis = self.ω_tensor[axes[i]][h].view(1, 1)
+
+                # structured φ update along axis + residual elsewhere
+                φ_new = φ + ω_axis * d_axis + dφ_residual * norm_other
+                A_new = A + dA
+
+                updated_bundle[:, idx] = A_new.squeeze(-1)
+                updated_bundle[:, idx+1] = φ_new.squeeze(-1)
+
+            new_bundles.append(updated_bundle)
+
+        return torch.cat(new_bundles, dim=-1)  # (B, k*g)
+
+    def increment_latent_time(self, latent_fiber, dt, pos, time):
+        """
+        Advance the bundles in time using the dt offset.
+        """
+        B = latent_fiber.shape[0]
+        device = latent_fiber.device
+
+        dt_tensor = torch.full((B, 1), dt, device=device)
+        dx = torch.zeros((B, 1), device=device)
+        dy = torch.zeros((B, 1), device=device)
+
+        x, y, t = pos[:, 0:1], pos[:, 1:2], time
+
+        incremented_bundle = self.transport_bundles(latent_fiber, dx, dy, dt_tensor, x, y, t)
+        return incremented_bundle
+
+    def decode(self, latent_fiber, pos, time):
+        """
+        Decode the bundles into the final image.
+        """
+        # Unpack the bundles into their respective components
+        Aφ_bundles = torch.chunk(latent_fiber, chunks=self._num_dims, dim=-1)
+        expanded_bundle = []
+
+        for bundle in Aφ_bundles:  # x, y, t
+            for h in range(self.k):
+                idx = h * 2
+                A, φ = bundle[:, idx:idx+1], bundle[:, idx+1:idx+2]
+                sinφ = torch.sin(φ)
+                cosφ = torch.cos(φ)
+                expanded_bundle.append(A * sinφ)
+                expanded_bundle.append(A * cosφ)
+        expanded_bundle = torch.cat(expanded_bundle, dim=-1)
+        # Concatenate the expanded bundle with the position and time
+        x_in = torch.cat([expanded_bundle, pos, time], dim=-1)
+        reconstructed_image = self.image_decoder(x_in)
+        return reconstructed_image
+
+    def forward(self, color, pos, time):
+        x_in = torch.cat([color, pos, time], dim=-1)
+        latent_fiber = self.fiber_encoder(x_in)
+        reconstructed_image = self.decode(latent_fiber, pos, time)
+        return reconstructed_image, latent_fiber
+
+
 def calculate_losses(model, dct_loss, mse_loss, image, image_next, pos, time, dt):
     """
     Calculate the reconstruction and prediction losses for the model.
@@ -108,12 +265,12 @@ def calculate_losses(model, dct_loss, mse_loss, image, image_next, pos, time, dt
     reconstructed_next_error = (dct_loss(reconstructed_next, image_next) + mse_loss(reconstructed_next, image_next)) / 2.0
     full_reconstruction_error = (reconstruction_error + reconstructed_next_error) / 2.0
 
-    predicted_latent = model.advance_latent(latent, dt)
-    predicted_image = model.decoder(predicted_latent)
+    predicted_latent = model.increment_latent_time(latent, dt, pos, time)
+    predicted_image = model.decode(predicted_latent, pos, time + dt)
     prediction_loss = (dct_loss(predicted_image, image_next) + mse_loss(predicted_image, image_next)) / 2.0
 
-    rewound_latent = model.advance_latent(latent_next, -dt)
-    rewound_image = model.decoder(rewound_latent)
+    rewound_latent = model.increment_latent_time(latent_next, -dt, pos, time)
+    rewound_image = model.decode(rewound_latent, pos, time - dt)
     rewound_loss = (dct_loss(rewound_image, image) + mse_loss(rewound_image, image)) / 2.0
 
     full_prediction_error = (prediction_loss + rewound_loss) / 2.0
@@ -184,9 +341,24 @@ def simulation_test(model, frame_reference, shape, dt, idx, latent, reconstructe
 
     N = 10
     advanced_latent = latent.detach().clone()
+    rewound_latent = latent.detach().clone()
+
+    H, W, _ = shape
+    device = test_image.device
+    x_lin = torch.linspace(0, 1, W, device=device)
+    y_lin = torch.linspace(0, 1, H, device=device)
+    x, y = torch.meshgrid(x_lin, y_lin, indexing='xy')
+    pos = torch.stack([x.flatten(), y.flatten()], dim=-1)
+
+    # Set initial time from frame index
+    total_frames = len(frame_reference)
+    t_init = idx / total_frames
+    time = torch.full((H * W, 1), t_init, device=device)
+
     for i in range(N):
-        advanced_latent = model.advance_latent(advanced_latent, dt)
-        predicted_image = model.decoder(advanced_latent).view(-1, *shape)
+        time = time + dt
+        advanced_latent = model.increment_latent_time(advanced_latent, dt, pos, time)
+        predicted_image = model.decode(advanced_latent, pos, time).view(-1, *shape)
         frames.append(predicted_image)
 
         predicted_image_reshaped = predicted_image.permute(0, 3, 1, 2)
@@ -195,10 +367,11 @@ def simulation_test(model, frame_reference, shape, dt, idx, latent, reconstructe
         ssim_predicted = ssim(predicted_image_reshaped, next_test_image)
         ssim_values.append(ssim_predicted.item())
 
-    rewound_latent = latent.detach().clone()
+    time = torch.full((H * W, 1), t_init, device=device)
     for i in range(N):
-        rewound_latent = model.advance_latent(rewound_latent, -dt)
-        rewound_image = model.decoder(rewound_latent).view(-1, *shape)
+        time = time - dt
+        rewound_latent = model.increment_latent_time(rewound_latent, -dt, pos, time)
+        rewound_image = model.decode(rewound_latent, pos, time).view(-1, *shape)
         frames.insert(0, rewound_image)
 
         rewound_image_reshaped = rewound_image.permute(0, 3, 1, 2)
@@ -224,7 +397,6 @@ def write_metrics_and_gif(metrics, frames, output_dir, epoch, idx):
 
     # Write frames as a GIF in the epoch directory
     squeezed_frames = [frame.squeeze(0) for frame in frames]  # Remove the prepended dimension
-    print(f"Frame sizes after squeeze: {[frame.shape for frame in squeezed_frames]}")
     gif_path = os.path.join(epoch_dir, f"debug_{idx}.gif")
     imageio.mimsave(
         gif_path,
@@ -245,7 +417,7 @@ def train_drill_model(image_dir, device='cuda', epochs=100, batch_size=8192, exp
 
     mse_loss = nn.MSELoss().to(device)
     dct_loss = DCTLoss().to(device)
-    model = DrillNet(**decoder_config).to(device)
+    model = DrillNet2(**decoder_config).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     log_epochs = list(range(0, 11, 1)) + list(range(10, 51, 5)) + list(range(50, 101, 10)) + list(range(100, 501, 50)) + list(range(500, 1001, 100))
         

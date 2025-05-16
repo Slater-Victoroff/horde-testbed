@@ -452,21 +452,21 @@ EXPERIMENTS = []
 
 EXPERIMENTS += [{
     "model_type": "drill",
-    "name": "drill-fiber-cloud",
+    "name": "drill2-fiber-cloud",
     "dataset": "VFX/clouds/cloud01",
     "config": {},
 }]
 
 EXPERIMENTS += [{
     "model_type": "drill",
-    "name": "drill-fiber-explosion",
+    "name": "drill2-fiber-explosion",
     "dataset": "VFX/explosions/explosion00",
     "config": {},
 }]
 
 EXPERIMENTS += [{
     "model_type": "drill",
-    "name": "drill-fiber-flame",
+    "name": "drill2-fiber-flame",
     "dataset": "VFX/hollow-flame",
     "config": {},
 }]
