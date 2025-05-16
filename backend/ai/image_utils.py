@@ -5,7 +5,9 @@ import torch
 import numpy as np
 import OpenEXR
 import imageio.v3 as iio
+from PIL import Image
 from torchvision.utils import save_image
+from torchvision.datasets import MovingMNIST
 
 from make_shader import save_latent_to_exr
 
@@ -59,94 +61,123 @@ def load_exr_image(image_path):
     return rgba
 
 
-def load_images(image_dir, device, input_image_channels=4, control_channels=2):
-    image_tensors = []
-    pos_tensors = []
-    control_tensors = []
+def load_images(image_dir, device, input_image_channels=4, control_channels=2, norm=True, add_next=False):
+    if "moving_mnist" in image_dir.name:
+        input_image_channels = 1
+    # Control tensor assumed to be [time (0/1 normalized), latent(int)]
+    image_tensors, pos_tensors, control_tensors = [], [], []
+    if add_next:
+        image_tensors_next = []
     shape = None
 
-    def _process_frame(frame, frame_idx=None):
+    def _process_frame(frame, frame_idx=None, sequence_idx=0, prior_frame=None):
         nonlocal shape
-        # frame = remove_background(frame)
-        if frame.shape[-1] < input_image_channels:
-            # Pad with 1s to match the required number of channels
-            padding = np.ones((*frame.shape[:-1], input_image_channels - frame.shape[-1]), dtype=frame.dtype)
-            frame = np.concatenate([frame, padding], axis=-1)
+        # Ensure correct channels
+        h, w, c = frame.shape
+        if c < input_image_channels:
+            pad = np.ones((h, w, input_image_channels - c), dtype=frame.dtype)
+            frame = np.concatenate([frame, pad], axis=-1)
         if shape is None:
             shape = frame.shape
         elif shape != frame.shape:
-            raise ValueError(f"Frame shape mismatch: {shape} != {frame.shape}")
-        image_tensor = torch.tensor(frame, dtype=torch.float32, device=device).view(-1, input_image_channels)  # Flatten to [H*W, 4]
-        image_tensors.append(image_tensor)
+            raise ValueError(f"Frame shape mismatch: {shape} vs {frame.shape}")
+        # flatten image
+        img = torch.tensor(frame, dtype=torch.float32, device=device).view(-1, input_image_channels)
+        if add_next and prior_frame is not None:
+            image_tensors_next.append(img)
+            prior_frame = torch.tensor(prior_frame, dtype=torch.float32, device=device).view(-1, input_image_channels)
+            image_tensors.append(prior_frame)
+        else:
+            image_tensors.append(img)
 
-        # Generate control tensor
-        control_values = [frame_idx] if frame_idx is not None else []
-        control_tensor = torch.tensor(control_values + [0] * (control_channels - len(control_values)), device=device)
-        control_tensors.append(control_tensor.repeat(image_tensor.size(0), 1))  # [H*W, CONTROL_CHANNELS]
-        # Generate positional embeddings
-        H, W, _ = frame.shape
-        x_coords = torch.arange(W, device=device).repeat(H, 1).view(-1, 1)  # [H*W, 1]
-        y_coords = torch.arange(H, device=device).repeat(W, 1).t().contiguous().view(-1, 1)  # [H*W, 1]
-        pos_tensor = torch.cat([x_coords, y_coords], dim=1)  # [H*W, 2]
-        pos_tensors.append(pos_tensor)
+        # control vector
+        ctrl = torch.tensor([frame_idx] + [sequence_idx]*(control_channels-1), device=device)
+        control_tensors.append(ctrl.repeat(img.size(0),1))
+        # positional coords
+        if norm:
+            xs = torch.arange(w, device=device).repeat(h,1).view(-1,1) / w
+            ys = torch.arange(h, device=device).repeat(w,1).t().reshape(-1,1) / h
+        else:
+            xs = torch.arange(w, device=device).repeat(h,1).view(-1,1)
+            ys = torch.arange(h, device=device).repeat(w,1).t().reshape(-1,1)
+        pos = torch.cat([xs, ys], dim=1)
+        pos_tensors.append(pos)
+        return img
 
-    # Check for GIF files in the directory
-    gif_files = list(image_dir.glob("**/*.gif"))
-    if gif_files:
-        if len(gif_files) > 1:
-            raise ValueError("Multiple GIF files found. Please provide only one GIF file.")
-        gif_path = gif_files[0]
-        gif_frames = iio.imread(gif_path, plugin="pillow")  # Load all frames from the GIF
-        normalized_frames = [gif_frame / 255.0 for gif_frame in gif_frames]
-        for frame_idx, frame in enumerate(normalized_frames):
-            _process_frame(frame, frame_idx)
+    if "moving_mnist" in image_dir.name:
+        dataset = MovingMNIST(root="ref_data", split=None, download=True)
+        for sequence_idx, video in enumerate(dataset[:5]):
+            # video: [T, 1, H, W], convert to numpy for consistency
+            video = video.squeeze(1).numpy()  # [T, H, W]
+            video = video / 255.0  # normalize
+
+            if add_next:
+                prior_frame = None
+            for frame_idx, frame in enumerate(video):
+                frame = np.expand_dims(frame, axis=-1)
+                if add_next:
+                    if prior_frame is not None:
+                        _process_frame(frame, frame_idx, sequence_idx, prior_frame)
+                    prior_frame = frame
+                else:
+                    _process_frame(frame, frame_idx, sequence_idx)
     else:
-        # Process EXR files
-        for image_path in sorted(image_dir.glob("**/*.exr")):  # Assuming EXR images
-            image = load_exr_image(image_path)
-            # Extract control values from the filename using regex
-            matches = re.findall(r'\d+', image_path.stem)
-            control_values = [int(match) for match in matches]
-            _process_frame(image, control_values[1] if control_values else None)
+        # Check for GIF files in the directory
+        gif_files = list(image_dir.glob("**/*.gif"))
+        if gif_files:
+            if len(gif_files) > 1:
+                raise ValueError("Multiple GIF files found. Please provide only one GIF file.")
+            gif_path = gif_files[0]
+            gif_frames = iio.imread(gif_path, plugin="pillow")  # Load all frames from the GIF
+            normalized_frames = [gif_frame / 255.0 for gif_frame in gif_frames]
+            for frame_idx, frame in enumerate(normalized_frames):
+                _process_frame(frame, frame_idx)
+        else:
+            # Process EXR files
+            if add_next:
+                prior_frame = None
+            for image_path in sorted(image_dir.glob("**/*.exr")):  # Assuming EXR images
+                image = load_exr_image(image_path)
+                # Extract control values from the filename using regex
+                matches = re.findall(r'\d+', image_path.stem)
+                time = int(matches[1])
+                if add_next:
+                    if prior_frame is not None:
+                        _process_frame(image, time, int(matches[0]), prior_frame)
+                    prior_frame = image
 
 
     # Combine all tensors
     image_tensor = torch.cat(image_tensors, dim=0)  # [H*W*images, INPUT_IMAGE_CHANNELS]
     image_tensor = image_tensor / image_tensor.max()  # Normalize to [0, 1]
+    if add_next:
+        image_tensor_next = torch.cat(image_tensors_next, dim=0)
+        image_tensor_next = image_tensor_next / image_tensor_next.max()
     raw_pos = torch.cat(pos_tensors, dim=0)  # [H*W*images, 2]
     control = torch.cat(control_tensors, dim=0)  # [H*W*images, CONTROL_CHANNELS]
-    print("image_tensor shape:", image_tensor.shape)
-    print("raw_pos shape:", raw_pos.shape)
-    print("control tensor shape:", control.shape)
-    print("torch unique control tensor:", torch.unique(control[:, 1], dim=0))
-    # Identify the time axis
-    time_axis = None
-    h, w = shape[:2]  # Height and width of the image
-    step = h * w  # Step size to sample every frame
-    print(f"Step size for sampling: {step}")
 
-    for i in range(control.size(1)):
-        sampled_values = control[::step, i]  # Sample every h*w values
-        unique_values = torch.unique(sampled_values)
-        if len(unique_values) > 1 and torch.all(unique_values[1:] - unique_values[:-1] > 0):  # Check for increasing values
-            time_axis = i
-            break
+    # control[:, 0] is the time axis, control[:, 1] is the sequence ID
+    seq_ids   = control[:,1].long()            # keep these intact
+    time_vals = control[:,0:1]                 # just the time axis
 
-    if time_axis is not None and time_axis != 0:
-        # Swap the time axis to the first position
-        control = torch.cat([control[:, time_axis:time_axis + 1], control[:, :time_axis], control[:, time_axis + 1:]], dim=1)
-    elif time_axis is None:
-        raise ValueError("Unable to identify a time axis in the control tensor.")
+    # normalize *only* the continuous dims:
+    if norm:
+        t_min, _ = time_vals.min(0, keepdim=True)
+        t_max, _ = time_vals.max(0, keepdim=True)
+        t_norm   = (time_vals - t_min) / (t_max - t_min + 1e-8)
 
-    # Normalize each control channel to the range [0, 1]
-    control_min, _ = control.min(dim=0, keepdim=True)
-    control_max, _ = control.max(dim=0, keepdim=True)
-    control = (control - control_min) / (control_max - control_min + 1e-8)  # Add epsilon to avoid division by zero
+        # rebuild:
+        control = torch.cat([t_norm, seq_ids.unsqueeze(1)], dim=1)
 
     image_tensor = image_tensor.to(device)
+    if add_next:
+        image_tensor_next = image_tensor_next.to(device)
     control = control.to(device)
     raw_pos = raw_pos.to(device)
-    return image_tensor, raw_pos, control, shape
+    if add_next:
+        return image_tensor, image_tensor_next, raw_pos, control, shape
+    else:
+        return image_tensor, raw_pos, control, shape
 
 
 def save_images(model, control_tensor, epoch, n=5):
@@ -177,8 +208,10 @@ def save_images(model, control_tensor, epoch, n=5):
             save_image(rgb_image, rgb_path)
 
         # Save the shared latent image as an EXR file
-        latent_path = os.path.join(epoch_dir, "shared_latent.exr")
-        save_latent_to_exr(model.shared_latent, latent_path)
+        latent_path = os.path.join(epoch_dir, "test_latent.exr")
+        sample_latent = model.latents(torch.tensor([0], device="cuda"))  # [1, H*W*C]
+        latent_grid = sample_latent.view(model.height, model.width, 4)
+        save_latent_to_exr(latent_grid, latent_path)
         print(f"Shared latent image saved to {latent_path}")
 
         # Save the model/weights
@@ -194,7 +227,7 @@ def save_images(model, control_tensor, epoch, n=5):
     return reconstructed_batch, sampled_controls
 
 
-def generate_control_animation(model, control_tensor, gif_path, num_frames=50, control_axis=None, fixed_values=None):
+def generate_control_animation(model, control_tensor, gif_path, num_frames=20, control_axis=None, fixed_values=None):
     """
     Generate a GIF by sampling control vectors along specified axes and rendering frames.
     :param model: The model to generate frames.
@@ -229,22 +262,30 @@ def generate_control_animation(model, control_tensor, gif_path, num_frames=50, c
     outputs = []
     with torch.no_grad():
         for control in sampled_controls:
-            reconstructed_rgb = model.full_image(control.unsqueeze(0))  # Pass control vector to model
-            outputs.append(reconstructed_rgb)
-            rgb_image = reconstructed_rgb.squeeze(0).cpu().numpy()  # [H, W, C]
+            reconstructed = model.full_image(control.unsqueeze(0))  # Pass control vector to model
+            outputs.append(reconstructed)
+            output_image = reconstructed.squeeze(0).cpu().numpy()  # [H, W, C]
 
             # Gamma correction
-            rgb_image = np.clip(rgb_image, 0, 1)
-            rgb_image = rgb_image ** (1 / 2.2)
+            output_image = np.clip(output_image, 0, 1)
+            # output_image = output_image ** (1 / 2.2)
             
             # Check if the output has 4 channels and remove the fourth channel if present
-            if rgb_image.shape[-1] == 4:
-                rgb_image = rgb_image[..., :3]
-            
-            frame = (rgb_image * 255).astype(np.uint8)  # Convert to uint8 for GIF
-            frames.append(frame)
+            if output_image.shape[-1] == 1:
+                frame = (output_image[..., 0] * 255).astype(np.uint8)
+                pil_mode = "L"
+            elif output_image.shape[-1] in [3, 4]:
+                frame = (output_image[..., :3] * 255).astype(np.uint8)
+                pil_mode = "RGB"
+            frames.append(Image.fromarray(frame, mode=pil_mode))
 
-    iio.imwrite(gif_path, frames)
+    frames[0].save(
+        gif_path,
+        save_all=True,
+        append_images=frames[1:],
+        duration=40,
+        loop=0
+    )
     print(f"Control animation GIF saved to {gif_path}")
     return torch.stack(outputs), sampled_controls
 

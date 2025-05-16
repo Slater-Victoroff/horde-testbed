@@ -12,15 +12,14 @@ from decoders import VFXSpiralNetDecoder, VFXNetPixelDecoder
 from losses import DCTLoss
 from make_shader import decoder_to_glsl, compare_decoder_and_shader, save_weights_to_exr
 from image_utils import load_images, save_images
+from soap import SOAP
 
-INPUT_IMAGE_CHANNELS = 4  # RGBA
+
 LATENT_IMAGE_CHANNELS = 4 # RGBA
-POS_CHANNELS = 8
-CONTROL_CHANNELS = 2
 
 
 class VFXNet(nn.Module):
-    def __init__(self, height, width, decoder_config=None, device='cuda', experiment_name=None):
+    def __init__(self, height, width, decoder_config=None, device='cuda', experiment_name=None, num_sequences=1, freeze_decoder=False):
         super().__init__()
         self.experiment_name = experiment_name
         self.height = height
@@ -29,8 +28,13 @@ class VFXNet(nn.Module):
         _y_coords = torch.arange(height).repeat(width, 1).t().contiguous().view(-1, 1)
         self.raw_pos = torch.cat([_x_coords, _y_coords], dim=1)
 
-        self.shared_latent = nn.Parameter(torch.randn(height, width, LATENT_IMAGE_CHANNELS))
+        self.latents = nn.Embedding(num_sequences, self.height * self.width * LATENT_IMAGE_CHANNELS)
         self.decoder = VFXSpiralNetDecoder(**decoder_config or {})
+        self.output_channels = self.decoder.output_channels
+        self.freeze_decoder = freeze_decoder
+        if self.freeze_decoder:
+            for param in self.decoder.parameters():
+                param.requires_grad = False
         self.raw_pos = self.raw_pos.to(device)
         self._initialize_weights()
 
@@ -43,31 +47,42 @@ class VFXNet(nn.Module):
 
 
     def forward(self, raw_pos, control):
-        return self.decoder(self.shared_latent, raw_pos, control)
+        latent = self.latents(control[:, 1].long())
+        latent = latent.view(-1, self.height, self.width, LATENT_IMAGE_CHANNELS)
+        return self.decoder(latent, raw_pos, control[:, 0:1])
     
     def full_image(self, control):
         # Expand control to match the first dimension of self.raw_pos
-        expanded_control = control.unsqueeze(1).expand(-1, self.raw_pos.size(0), -1).reshape(-1, control.size(-1))
-        response = self.decoder(self.shared_latent, self.raw_pos, expanded_control)
-        shaped_image = response.view(self.height, self.width, INPUT_IMAGE_CHANNELS)
+        latent = self.latents(control[:, 1].long())
+        latent = latent.view(-1, self.height, self.width, LATENT_IMAGE_CHANNELS)
+        t = control[:, 0:1]
+        expanded_time = t.unsqueeze(1).expand(-1, self.raw_pos.size(0), -1).reshape(-1, t.size(-1))
+        response = self.decoder(latent, self.raw_pos, expanded_time)
+        shaped_image = response.view(self.height, self.width, self.output_channels)
         return shaped_image
 
 
-def train_vfx_model(image_dir, device='cuda', epochs=100, batch_size=8192, experiment_name=None, decoder_config=None):
+def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, experiment_name=None, decoder_config=None):
     # Load images and create tensors
     image_tensor, raw_pos, control_tensor, shape = load_images(image_dir, device)
+    print(f"image_tensor shape: {image_tensor.shape}")
     mse_loss = nn.MSELoss().to(device)
     dct_loss = DCTLoss().to(device)
 
     # Create a dataset and dataloader
     dataset = TensorDataset(image_tensor, raw_pos, control_tensor)
 
-    model = VFXNet(shape[0], shape[1], decoder_config=decoder_config).to(device)
+    num_sequences = int(control_tensor[:, 1].max().item()) + 1
+    model = VFXNet(shape[0], shape[1], decoder_config=decoder_config, num_sequences=num_sequences).to(device)
     model.experiment_name = experiment_name or datetime.now().strftime("%Y%m%d_%H%M%S")
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = SOAP(
+        model.parameters(),
+        weight_decay=0,
+    )
     train_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    scheduler = CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-5)
+    # scheduler = CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-5)
 
     for epoch in range(epochs):
         print(f"Epoch {epoch + 1}/{epochs}")
@@ -88,10 +103,12 @@ def train_vfx_model(image_dir, device='cuda', epochs=100, batch_size=8192, exper
             optimizer.step()
 
             epoch_loss += loss.item()
-        scheduler.step()
+        # scheduler.step()
 
         print(f"Epoch [{epoch + 1}/{epochs}], Loss: {epoch_loss:.6f}")
-        if epoch in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80, 90, 99]:
+        # Log specific epochs for detailed analysis
+        log_epochs = list(range(0, 11, 1)) + list(range(10, 51, 5)) + list(range(50, 101, 10)) + list(range(100, 501, 50)) + list(range(500, 1001, 100))
+        if epoch in log_epochs:
             model.eval()  # Set model to evaluation mode
             reconstructed_batch, sampled_controls = save_images(model, control_tensor, epoch)
             print(f"Saved grayscale and reconstructed RGB images for epoch {epoch + 1}.")

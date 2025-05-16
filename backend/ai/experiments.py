@@ -1,7 +1,7 @@
 EXPERIMENTS = []
 # EXPERIMENTS += [
 #     {
-#         "name": "spiralbase-cloud",
+#         "name": "spiralbase-soap-cloud",
 #         "dataset": "VFX/clouds/cloud01",
 #         "config": {
 #             "trunk_pos_channels": 0,
@@ -16,6 +16,7 @@ EXPERIMENTS = []
 #             "apply_film": [1]
 #         }
 #     },
+# ]
 #     {
 #         "name": "spiral+raw-trunk-cloud",
 #         "dataset": "VFX/clouds/cloud01",
@@ -273,159 +274,199 @@ EXPERIMENTS = []
 #     }
 # ]
 
-for seed in range(1, 4):
-    EXPERIMENTS += [
-        {
-            "name": f"spiral-shadersmall-cloud-seed{seed}",
-            "dataset": "VFX/clouds/cloud01",
-            "config": {
-                "trunk_pos_channels": 0,
-                "trunk_time_channels": 0,
-                "film_pos_channels": 32,
-                "film_time_channels": 16,
-                "film_pos_scheme": "spiral",
-                "film_time_scheme": "spiral",
-                "film_pos_include_raw": False,
-                "film_time_include_raw": False,
-                "prefilm_dims": 32,
-                "hidden_dim": 48,  # trunk hidden size
-                "apply_film": [1]
-            }
-        },
-        {
-            "name": f"spiral-shaderdenseproj-cloud-seed{seed}",
-            "dataset": "VFX/clouds/cloud01",
-            "config": {
-                "trunk_pos_channels": 0,
-                "trunk_time_channels": 0,
-                "film_pos_channels": 64,
-                "film_time_channels": 32,
-                "film_pos_scheme": "spiral",
-                "film_time_scheme": "spiral",
-                "film_pos_include_raw": False,
-                "film_time_include_raw": False,
-                "prefilm_dims": 16,  # narrow projection
-                "hidden_dim": 32,
-                "apply_film": [1]
-            }
-        },
-        {
-            "name": f"spiral-shaderwideencproj64-cloud-seed{seed}",
-            "dataset": "VFX/clouds/cloud01",
-            "config": {
-                "trunk_pos_channels": 0,
-                "trunk_time_channels": 0,
-                "film_pos_channels": 64,
-                "film_time_channels": 32,
-                "film_pos_scheme": "spiral",
-                "film_time_scheme": "spiral",
-                "film_pos_include_raw": False,
-                "film_time_include_raw": False,
-                "prefilm_dims": 64,
-                "hidden_dim": 32,
-                "apply_film": [1]
-            }
-        },
-        {
-            "name": f"spiral-gaussianfilm-cloud-seed{seed}",
-            "dataset": "VFX/clouds/cloud01",
-            "config": {
-                "trunk_pos_channels": 0,
-                "trunk_time_channels": 0,
-                "film_pos_channels": 32,
-                "film_time_channels": 16,
-                "film_pos_scheme": "gaussian",
-                "film_time_scheme": "gaussian",
-                "film_pos_include_raw": False,
-                "film_time_include_raw": False,
-                "prefilm_dims": 32,
-                "hidden_dim": 64,  # trunk hidden size
-                "apply_film": [1]
-            }
-        },
-        {
-            "name": f"spiral-linearfilm-cloud-seed{seed}",
-            "dataset": "VFX/clouds/cloud01",
-            "config": {
-                "trunk_pos_channels": 0,
-                "trunk_time_channels": 0,
-                "film_pos_channels": 32,
-                "film_time_channels": 16,
-                "film_pos_scheme": "linear",
-                "film_time_scheme": "linear",
-                "film_pos_include_raw": False,
-                "film_time_include_raw": False,
-                "prefilm_dims": 32,
-                "hidden_dim": 64,  # trunk hidden size
-                "apply_film": [1]
-            }
-        },
-        {
-            "name": f"spiral-polyfilm-cloud-seed{seed}",
-            "dataset": "VFX/clouds/cloud01",
-            "config": {
-                "trunk_pos_channels": 0,
-                "trunk_time_channels": 0,
-                "film_pos_channels": 32,
-                "film_time_channels": 16,
-                "film_pos_scheme": "polynomial",
-                "film_time_scheme": "polynomial",
-                "film_pos_include_raw": False,
-                "film_time_include_raw": False,
-                "prefilm_dims": 32,
-                "hidden_dim": 64,  # trunk hidden size
-                "apply_film": [1]
-            }
-        },
-    ]
+# for seed in range(1, 4):
+#     EXPERIMENTS += [
+#         {
+#             "name": f"spiral-shadersmall-cloud-seed{seed}",
+#             "dataset": "VFX/clouds/cloud01",
+#             "config": {
+#                 "trunk_pos_channels": 0,
+#                 "trunk_time_channels": 0,
+#                 "film_pos_channels": 32,
+#                 "film_time_channels": 16,
+#                 "film_pos_scheme": "spiral",
+#                 "film_time_scheme": "spiral",
+#                 "film_pos_include_raw": False,
+#                 "film_time_include_raw": False,
+#                 "prefilm_dims": 32,
+#                 "hidden_dim": 48,  # trunk hidden size
+#                 "apply_film": [1]
+#             }
+#         },
+#         {
+#             "name": f"spiral-shaderdenseproj-cloud-seed{seed}",
+#             "dataset": "VFX/clouds/cloud01",
+#             "config": {
+#                 "trunk_pos_channels": 0,
+#                 "trunk_time_channels": 0,
+#                 "film_pos_channels": 64,
+#                 "film_time_channels": 32,
+#                 "film_pos_scheme": "spiral",
+#                 "film_time_scheme": "spiral",
+#                 "film_pos_include_raw": False,
+#                 "film_time_include_raw": False,
+#                 "prefilm_dims": 16,  # narrow projection
+#                 "hidden_dim": 32,
+#                 "apply_film": [1]
+#             }
+#         },
+#         {
+#             "name": f"spiral-shaderwideencproj64-cloud-seed{seed}",
+#             "dataset": "VFX/clouds/cloud01",
+#             "config": {
+#                 "trunk_pos_channels": 0,
+#                 "trunk_time_channels": 0,
+#                 "film_pos_channels": 64,
+#                 "film_time_channels": 32,
+#                 "film_pos_scheme": "spiral",
+#                 "film_time_scheme": "spiral",
+#                 "film_pos_include_raw": False,
+#                 "film_time_include_raw": False,
+#                 "prefilm_dims": 64,
+#                 "hidden_dim": 32,
+#                 "apply_film": [1]
+#             }
+#         },
+#         {
+#             "name": f"spiral-gaussianfilm-cloud-seed{seed}",
+#             "dataset": "VFX/clouds/cloud01",
+#             "config": {
+#                 "trunk_pos_channels": 0,
+#                 "trunk_time_channels": 0,
+#                 "film_pos_channels": 32,
+#                 "film_time_channels": 16,
+#                 "film_pos_scheme": "gaussian",
+#                 "film_time_scheme": "gaussian",
+#                 "film_pos_include_raw": False,
+#                 "film_time_include_raw": False,
+#                 "prefilm_dims": 32,
+#                 "hidden_dim": 64,  # trunk hidden size
+#                 "apply_film": [1]
+#             }
+#         },
+#         {
+#             "name": f"spiral-linearfilm-cloud-seed{seed}",
+#             "dataset": "VFX/clouds/cloud01",
+#             "config": {
+#                 "trunk_pos_channels": 0,
+#                 "trunk_time_channels": 0,
+#                 "film_pos_channels": 32,
+#                 "film_time_channels": 16,
+#                 "film_pos_scheme": "linear",
+#                 "film_time_scheme": "linear",
+#                 "film_pos_include_raw": False,
+#                 "film_time_include_raw": False,
+#                 "prefilm_dims": 32,
+#                 "hidden_dim": 64,  # trunk hidden size
+#                 "apply_film": [1]
+#             }
+#         },
+#         {
+#             "name": f"spiral-polyfilm-cloud-seed{seed}",
+#             "dataset": "VFX/clouds/cloud01",
+#             "config": {
+#                 "trunk_pos_channels": 0,
+#                 "trunk_time_channels": 0,
+#                 "film_pos_channels": 32,
+#                 "film_time_channels": 16,
+#                 "film_pos_scheme": "polynomial",
+#                 "film_time_scheme": "polynomial",
+#                 "film_pos_include_raw": False,
+#                 "film_time_include_raw": False,
+#                 "prefilm_dims": 32,
+#                 "hidden_dim": 64,  # trunk hidden size
+#                 "apply_film": [1]
+#             }
+#         },
+#     ]
 
-EXPERIMENTS += [
-    {
-        "name": "spiral-noproj-wideinput-cloud",
-        "dataset": "VFX/clouds/cloud01",
-        "config": {
-            "trunk_pos_channels": 0,
-            "trunk_time_channels": 0,
-            "film_pos_channels": 32,
-            "film_time_channels": 16,
-            "film_pos_scheme": "spiral",
-            "film_time_scheme": "spiral",
-            "film_pos_include_raw": False,
-            "film_time_include_raw": False,
-            "prefilm_dims": 0,
-            "apply_film": [1]
-        }
-    },
-    {
-        "name": "sinus-proj64-cloud",
-        "dataset": "VFX/clouds/cloud01",
-        "config": {
-            "trunk_pos_channels": 0,
-            "trunk_time_channels": 0,
-            "film_pos_channels": 32,
-            "film_time_channels": 16,
-            "film_pos_scheme": "sinusoidal",
-            "film_time_scheme": "sinusoidal",
-            "film_pos_include_raw": False,
-            "film_time_include_raw": False,
-            "prefilm_dims": 64,
-            "apply_film": [1]
-        }
-    },
-    {
-        "name": "spiral-smallraw-noproj-cloud",
-        "dataset": "VFX/clouds/cloud01",
-        "config": {
-            "trunk_pos_channels": 0,
-            "trunk_time_channels": 0,
-            "film_pos_channels": 4,
-            "film_time_channels": 2,
-            "film_pos_scheme": "spiral",
-            "film_time_scheme": "spiral",
-            "film_pos_include_raw": True,
-            "film_time_include_raw": True,
-            "prefilm_dims": 0,
-            "apply_film": [1]
-        }
-    },
-]
+# EXPERIMENTS += [
+#     {
+#         "name": "spiral-noproj-wideinput-cloud",
+#         "dataset": "VFX/clouds/cloud01",
+#         "config": {
+#             "trunk_pos_channels": 0,
+#             "trunk_time_channels": 0,
+#             "film_pos_channels": 32,
+#             "film_time_channels": 16,
+#             "film_pos_scheme": "spiral",
+#             "film_time_scheme": "spiral",
+#             "film_pos_include_raw": False,
+#             "film_time_include_raw": False,
+#             "prefilm_dims": 0,
+#             "apply_film": [1]
+#         }
+#     },
+#     {
+#         "name": "sinus-proj64-cloud",
+#         "dataset": "VFX/clouds/cloud01",
+#         "config": {
+#             "trunk_pos_channels": 0,
+#             "trunk_time_channels": 0,
+#             "film_pos_channels": 32,
+#             "film_time_channels": 16,
+#             "film_pos_scheme": "sinusoidal",
+#             "film_time_scheme": "sinusoidal",
+#             "film_pos_include_raw": False,
+#             "film_time_include_raw": False,
+#             "prefilm_dims": 64,
+#             "apply_film": [1]
+#         }
+#     },
+#     {
+#         "name": "spiral-smallraw-noproj-cloud",
+#         "dataset": "VFX/clouds/cloud01",
+#         "config": {
+#             "trunk_pos_channels": 0,
+#             "trunk_time_channels": 0,
+#             "film_pos_channels": 4,
+#             "film_time_channels": 2,
+#             "film_pos_scheme": "spiral",
+#             "film_time_scheme": "spiral",
+#             "film_pos_include_raw": True,
+#             "film_time_include_raw": True,
+#             "prefilm_dims": 0,
+#             "apply_film": [1]
+#         }
+#     },
+# ]
+
+# EXPERIMENTS += [{
+#         "name": "spiral-densefilm-5mmnist",
+#         "dataset": "moving_mnist",
+#         "config": {
+#             "trunk_pos_channels": 0,
+#             "trunk_time_channels": 0,
+#             "film_pos_channels": 32,
+#             "film_time_channels": 16,
+#             "film_pos_scheme": "spiral",
+#             "film_time_scheme": "spiral",
+#             "film_pos_include_raw": False,
+#             "film_time_include_raw": False,
+#             "prefilm_dims": 64,
+#             "apply_film": [1],
+#             "output_channels": 1,
+#         }
+#     },
+# ]
+
+EXPERIMENTS += [{
+    "model_type": "drill",
+    "name": "drill-fiber-cloud",
+    "dataset": "VFX/clouds/cloud01",
+    "config": {},
+}]
+
+EXPERIMENTS += [{
+    "model_type": "drill",
+    "name": "drill-fiber-explosion",
+    "dataset": "VFX/explosions/explosion00",
+    "config": {},
+}]
+
+EXPERIMENTS += [{
+    "model_type": "drill",
+    "name": "drill-fiber-flame",
+    "dataset": "VFX/hollow-flame",
+    "config": {},
+}]

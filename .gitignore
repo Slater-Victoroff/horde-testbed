@@ -35,6 +35,7 @@ venv/
 static/
 backend/ai/debug_outputs/
 backend/ai/final_data/
+backend/ai/ref_data/
 certbot/
 
 # Ignore large temporary data

@@ -67,11 +67,14 @@ class VFXSpiralNetDecoder(nn.Module):
             nn.Sigmoid()
         ])
 
-    def forward(self, latent, raw_pos, control, return_hidden_layer=None):
-        H, W, C = latent.shape
-        latent_flat = latent.view(-1, C)
-        linear_indices = raw_pos[:, 1] * W + raw_pos[:, 0]
-        indexed_latent = latent_flat[linear_indices]
+    def forward(self, latent, raw_pos, time, return_hidden_layer=None):
+        B, H, W, C = latent.shape
+        latent_flat = latent.view(B, -1, C)
+        x = raw_pos[:, 0].long()
+        y = raw_pos[:, 1].long()
+        flat_idx = y * W + x  # [B]
+        indexed_latent = latent_flat[torch.arange(B), flat_idx]
+
         x_coords = torch.clamp(raw_pos[..., 0:1], 0, W - 1) / W
         y_coords = torch.clamp(raw_pos[..., 1:2], 0, H - 1) / H
         norm_pos = torch.cat([x_coords, y_coords], dim=1)
@@ -90,7 +93,7 @@ class VFXSpiralNetDecoder(nn.Module):
 
         if self.trunk_time_channels > 0:
             trunk_time = compute_targeted_encodings(
-                control[:, 0:1],
+                time,
                 self.trunk_time_channels,
                 scheme=self.trunk_time_scheme,
                 include_raw=self.trunk_time_include_raw,
@@ -117,7 +120,7 @@ class VFXSpiralNetDecoder(nn.Module):
 
         if self.film_time_channels > 0:
             film_time = compute_targeted_encodings(
-                control[:, 0:1],
+                time,
                 self.film_time_channels,
                 scheme=self.film_time_scheme,
                 include_raw=self.film_time_include_raw,
