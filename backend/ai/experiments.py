@@ -1,11 +1,12 @@
 EXPERIMENTS = []
 # EXPERIMENTS += [
 #     {
-#         "name": "spiralbase-soap-cloud",
-#         "dataset": "VFX/clouds/cloud01",
+#         "name": "L1-campfire",
+#         "dataset": "VFX/stylized_flame/campfire01",
 #         "config": {
-#             "trunk_pos_channels": 0,
-#             "trunk_time_channels": 0,
+#             "latent_dim": 0,
+#             "trunk_pos_channels": 2,
+#             "trunk_time_channels": 1,
 #             "film_pos_channels": 16,
 #             "film_time_channels": 8,
 #             "film_pos_scheme": "spiral",
@@ -17,6 +18,110 @@ EXPERIMENTS = []
 #         }
 #     },
 # ]
+
+# EXPERIMENTS += [
+#     {
+#         "name": "L1-fireball",
+#         "dataset": "VFX/stylized_flame/fireball01",
+#         "config": {
+#             "latent_dim": 0,
+#             "trunk_pos_channels": 2,
+#             "trunk_time_channels": 1,
+#             "film_pos_channels": 16,
+#             "film_time_channels": 8,
+#             "film_pos_scheme": "spiral",
+#             "film_time_scheme": "spiral",
+#             "film_pos_include_raw": False,
+#             "film_time_include_raw": False,
+#             "prefilm_dims": 32,
+#             "apply_film": [1]
+#         }
+#     },
+# ]
+
+# EXPERIMENTS += [
+#     {
+#         "name": "L1-flame",
+#         "dataset": "VFX/stylized_flame/flame01",
+#         "config": {
+#             "latent_dim": 0,
+#             "trunk_pos_channels": 2,
+#             "trunk_time_channels": 1,
+#             "film_pos_channels": 16,
+#             "film_time_channels": 8,
+#             "film_pos_scheme": "spiral",
+#             "film_time_scheme": "spiral",
+#             "film_pos_include_raw": False,
+#             "film_time_include_raw": False,
+#             "prefilm_dims": 32,
+#             "apply_film": [1]
+#         }
+#     },
+# ]
+
+EXPERIMENTS += [
+    {
+        "name": "ossim-small-L1-campfire",
+        "dataset": "VFX/stylized_flame/campfire01",
+        "config": {
+            "latent_dim": 0,
+            "trunk_pos_channels": 2,
+            "trunk_time_channels": 1,
+            "film_pos_channels": 16,
+            "film_time_channels": 8,
+            "film_pos_scheme": "spiral",
+            "film_time_scheme": "spiral",
+            "film_pos_include_raw": False,
+            "film_time_include_raw": False,
+            "prefilm_dims": 32,
+            "hidden_dim": 32,
+            "apply_film": [1]
+        }
+    },
+]
+
+EXPERIMENTS += [
+    {
+        "name": "ossim-small-L1-fireball",
+        "dataset": "VFX/stylized_flame/fireball01",
+        "config": {
+            "latent_dim": 0,
+            "trunk_pos_channels": 2,
+            "trunk_time_channels": 1,
+            "film_pos_channels": 16,
+            "film_time_channels": 8,
+            "film_pos_scheme": "spiral",
+            "film_time_scheme": "spiral",
+            "film_pos_include_raw": False,
+            "film_time_include_raw": False,
+            "prefilm_dims": 32,
+            "hidden_dim": 32,
+            "apply_film": [1]
+        }
+    },
+]
+
+EXPERIMENTS += [
+    {
+        "name": "ossim-small-L1-flame",
+        "dataset": "VFX/stylized_flame/flame01",
+        "config": {
+            "latent_dim": 0,
+            "trunk_pos_channels": 2,
+            "trunk_time_channels": 1,
+            "film_pos_channels": 16,
+            "film_time_channels": 8,
+            "film_pos_scheme": "spiral",
+            "film_time_scheme": "spiral",
+            "film_pos_include_raw": False,
+            "film_time_include_raw": False,
+            "prefilm_dims": 32,
+            "hidden_dim": 32,
+            "apply_film": [1]
+        }
+    },
+]
+
 #     {
 #         "name": "spiral+raw-trunk-cloud",
 #         "dataset": "VFX/clouds/cloud01",
@@ -450,23 +555,23 @@ EXPERIMENTS = []
 #     },
 # ]
 
-EXPERIMENTS += [{
-    "model_type": "drill",
-    "name": "drill2-fiber-cloud",
-    "dataset": "VFX/clouds/cloud01",
-    "config": {},
-}]
+# EXPERIMENTS += [{
+#     "model_type": "drill",
+#     "name": "sloss-drill-fiber-cloud",
+#     "dataset": "VFX/clouds/cloud01",
+#     "config": {},
+# }]
 
-EXPERIMENTS += [{
-    "model_type": "drill",
-    "name": "drill2-fiber-explosion",
-    "dataset": "VFX/explosions/explosion00",
-    "config": {},
-}]
+# EXPERIMENTS += [{
+#     "model_type": "drill",
+#     "name": "soapdrill-fiber-explosion",
+#     "dataset": "VFX/explosions/explosion00",
+#     "config": {},
+# }]
 
-EXPERIMENTS += [{
-    "model_type": "drill",
-    "name": "drill2-fiber-flame",
-    "dataset": "VFX/hollow-flame",
-    "config": {},
-}]
+# EXPERIMENTS += [{
+#     "model_type": "drill",
+#     "name": "soapdrill-fiber-flame",
+#     "dataset": "VFX/hollow-flame",
+#     "config": {},
+# }]

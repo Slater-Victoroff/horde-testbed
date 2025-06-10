@@ -8,7 +8,7 @@ from single_pixel import VFXNet
 from encoding_utils import compute_targeted_encodings
 
 RESULTS_DIR = "results"
-DEBUG_DIR = "debug_outputs"
+DEBUG_DIR = "png_tests"
 
 # --- Helpers --------------------------------------------------------------
 
@@ -178,7 +178,7 @@ def inspect_film(
 # --- Main ----------------------------------------------------------------
 if __name__ == "__main__":
     # 1) Export weights + manifest
-    convert_to_webgpu("spiral-spiral-baseline")
+    convert_to_webgpu("wloss-small-L1-flame")
 
     # # 2) Inspect a few weights
     # manifest, flat = load_flat_weights(

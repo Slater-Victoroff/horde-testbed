@@ -39,6 +39,7 @@ def run_single_job(job, static_dir):
         return "done"
     except RuntimeError as e:
         if "out of memory" in str(e).lower():
+            print(f"error: {e}")
             print(f"OOM on {name}")
             sys.exit(42)
         raise

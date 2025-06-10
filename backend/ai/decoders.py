@@ -67,22 +67,23 @@ class VFXSpiralNetDecoder(nn.Module):
             nn.Sigmoid()
         ])
 
-    def forward(self, latent, raw_pos, time, return_hidden_layer=None):
-        B, H, W, C = latent.shape
-        latent_flat = latent.view(B, -1, C)
-        x = raw_pos[:, 0].long()
-        y = raw_pos[:, 1].long()
-        flat_idx = y * W + x  # [B]
-        indexed_latent = latent_flat[torch.arange(B), flat_idx]
+    def forward(self, raw_pos, time, latent=None, return_hidden_layer=None):
+        if self.latent_dim > 0:
+            print("The world has ended")
+            x = raw_pos[:, 0:1]
+            y = raw_pos[:, 1:2]
+            B, H, W, C = latent.shape
+            latent_flat = latent.view(B, -1, C)
+            flat_idx = y * W + x  # [B]
+            indexed_latent = latent_flat[torch.arange(B), flat_idx]
 
-        x_coords = torch.clamp(raw_pos[..., 0:1], 0, W - 1) / W
-        y_coords = torch.clamp(raw_pos[..., 1:2], 0, H - 1) / H
-        norm_pos = torch.cat([x_coords, y_coords], dim=1)
-
-        main_input = [indexed_latent]
+        main_input = []
+        if self.latent_dim > 0:
+            main_input.append(indexed_latent)
+        
         if self.trunk_pos_channels > 0:
             pos_enc = compute_targeted_encodings(
-                norm_pos,
+                raw_pos,
                 self.trunk_pos_channels,
                 scheme=self.trunk_pos_scheme,
                 include_raw=self.trunk_pos_include_raw,
@@ -107,7 +108,7 @@ class VFXSpiralNetDecoder(nn.Module):
         film_input = []
         if self.film_pos_channels > 0:
             film_pos = compute_targeted_encodings(
-                norm_pos,
+                raw_pos,
                 self.film_pos_channels,
                 scheme=self.film_pos_scheme,
                 include_raw=self.film_pos_include_raw,

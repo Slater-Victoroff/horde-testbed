@@ -123,20 +123,37 @@ def load_images(image_dir, device, input_image_channels=4, control_channels=2, n
                     _process_frame(frame, frame_idx, sequence_idx)
     else:
         # Check for GIF files in the directory
-        gif_files = list(image_dir.glob("**/*.gif"))
+        gif_files = [gif for gif in image_dir.glob("**/*.gif") if gif.name != "debug.gif"]
+        png_files = [png for png in sorted(image_dir.glob("**/*.png")) if png.name != "debug.png"]
+        exr_files = [exr for exr in sorted(image_dir.glob("**/*.exr")) if exr.name != "debug.exr"]
         if gif_files:
             if len(gif_files) > 1:
-                raise ValueError("Multiple GIF files found. Please provide only one GIF file.")
+                raise ValueError("Multiple GIF files found (excluding debug.gif). Please provide only one GIF file.")
             gif_path = gif_files[0]
             gif_frames = iio.imread(gif_path, plugin="pillow")  # Load all frames from the GIF
             normalized_frames = [gif_frame / 255.0 for gif_frame in gif_frames]
             for frame_idx, frame in enumerate(normalized_frames):
                 _process_frame(frame, frame_idx)
-        else:
+        elif png_files:
+            if add_next:
+                prior_frame = None
+            for image_path in png_files:
+                image = Image.open(image_path).convert("RGBA")
+                image = np.array(image) / 255.0
+                matches = re.findall(r'\d+', image_path.stem)
+                time = int(matches[0])
+                if add_next:
+                    if prior_frame is not None:
+                        _process_frame(image, time, int(matches[1]), prior_frame)
+                    prior_frame = image
+                else:
+                    _process_frame(image, time)
+
+        elif exr_files:
             # Process EXR files
             if add_next:
                 prior_frame = None
-            for image_path in sorted(image_dir.glob("**/*.exr")):  # Assuming EXR images
+            for image_path in exr_files:  # Assuming EXR images
                 image = load_exr_image(image_path)
                 # Extract control values from the filename using regex
                 matches = re.findall(r'\d+', image_path.stem)
@@ -145,7 +162,8 @@ def load_images(image_dir, device, input_image_channels=4, control_channels=2, n
                     if prior_frame is not None:
                         _process_frame(image, time, int(matches[0]), prior_frame)
                     prior_frame = image
-
+                else:
+                    _process_frame(image, time)
 
     # Combine all tensors
     image_tensor = torch.cat(image_tensors, dim=0)  # [H*W*images, INPUT_IMAGE_CHANNELS]
@@ -180,66 +198,38 @@ def load_images(image_dir, device, input_image_channels=4, control_channels=2, n
         return image_tensor, raw_pos, control, shape
 
 
-def save_images(model, control_tensor, epoch, n=5):
-    # Create directory structure
-    base_dir = "final_data"
-    epoch_dir = os.path.join(base_dir, model.experiment_name, f"epoch_{epoch}")
-    os.makedirs(epoch_dir, exist_ok=True)
-
+def save_images(model, control_tensor, n=5, base_dir=None, write_files=True):
     with torch.no_grad():
         # Randomly select n unique control vectors
         indices = torch.randperm(control_tensor.size(0))[:n]
         selected_controls = control_tensor[indices]
 
-        # Log details about the selected control vectors
-        print(f"Selected control vectors for epoch {epoch}:")
-        for idx, control in enumerate(selected_controls):
-            print(f"Control vector {idx + 1}: {control.cpu().numpy()}")
-
         # Generate reconstructed RGB images for each selected control vector
         for i, control in enumerate(selected_controls):
             reconstructed_rgb = model.full_image(control.unsqueeze(0))  # Pass control vector to model
-            print(f"Reconstructed RGB shape: {reconstructed_rgb.shape}")
             rgb_image = reconstructed_rgb.squeeze(0).permute(2, 0, 1)  # [C, H, W]
 
-            # Save the reconstructed RGB image with control vector details in the filename
-            control_details = "_".join(f"{val:.2f}" for val in control.cpu().numpy())
-            rgb_path = os.path.join(epoch_dir, f"reconstructed_rgb_{control_details}.png")
-            save_image(rgb_image, rgb_path)
+            if write_files:
+                control_details = "_".join(f"{val:.2f}" for val in control.cpu().numpy())
+                rgb_path = os.path.join(base_dir, f"reconstructed_rgb_{control_details}.png")
+                save_image(rgb_image, rgb_path)
 
         # Save the shared latent image as an EXR file
-        latent_path = os.path.join(epoch_dir, "test_latent.exr")
-        sample_latent = model.latents(torch.tensor([0], device="cuda"))  # [1, H*W*C]
-        latent_grid = sample_latent.view(model.height, model.width, 4)
-        save_latent_to_exr(latent_grid, latent_path)
-        print(f"Shared latent image saved to {latent_path}")
+        # latent_path = os.path.join(epoch_dir, "test_latent.exr")
+        # sample_latent = model.latents(torch.tensor([0], device="cuda"))  # [1, H*W*C]
+        # latent_grid = sample_latent.view(model.height, model.width, 4)
+        gif_path = None
+        if write_files:
+            # save_latent_to_exr(latent_grid, latent_path)
+            model_path = os.path.join(base_dir, "model_weights.pth")
+            torch.save(model.state_dict(), model_path)
+            gif_path = os.path.join(base_dir, "control_animation.gif")
 
-        # Save the model/weights
-        model_path = os.path.join(epoch_dir, "model_weights.pth")
-        torch.save(model.state_dict(), model_path)
-        print(f"Model weights saved to {model_path}")
-
-        # Generate and save a GIF from evenly sampled control vectors
-        gif_path = os.path.join(epoch_dir, "control_animation.gif")
-        print(f"Control tensor shape: {control_tensor.shape}")
-        reconstructed_batch, sampled_controls = generate_control_animation(model, control_tensor, gif_path)
-        print(f"Control animation GIF saved to {gif_path}")
+        reconstructed_batch, sampled_controls = generate_control_animation(model, control_tensor, gif_path=gif_path, write_files=write_files)
     return reconstructed_batch, sampled_controls
 
 
-def generate_control_animation(model, control_tensor, gif_path, num_frames=20, control_axis=None, fixed_values=None):
-    """
-    Generate a GIF by sampling control vectors along specified axes and rendering frames.
-    :param model: The model to generate frames.
-    :param control_tensor: The tensor of control vectors.
-    :param gif_path: Path to save the generated GIF.
-    :param num_frames: Number of frames in the GIF.
-    :param control_axis: The axis to vary for animation (default: time axis, 0).
-    :param fixed_values: A dictionary specifying fixed values for other control axes (e.g., {1: 0.5}).
-    """
-    print(f"Generating control animation with {num_frames} frames.")
-    print(f"Control tensor shape: {control_tensor.shape}")
-
+def generate_control_animation(model, control_tensor, num_frames=20, control_axis=None, fixed_values=None, write_files=True, gif_path=None):
     if control_axis is None:
         control_axis = 0  # Default to time axis
 
@@ -256,7 +246,6 @@ def generate_control_animation(model, control_tensor, gif_path, num_frames=20, c
         control[control_axis] = i / (num_frames - 1)  # Linearly interpolate from 0 to 1
         sampled_controls.append(control)
     sampled_controls = torch.stack(sampled_controls)
-    print(f"Sampled control tensor shape: {sampled_controls.shape}")
     # Generate frames
     frames = []
     outputs = []
@@ -279,14 +268,14 @@ def generate_control_animation(model, control_tensor, gif_path, num_frames=20, c
                 pil_mode = "RGB"
             frames.append(Image.fromarray(frame, mode=pil_mode))
 
-    frames[0].save(
-        gif_path,
-        save_all=True,
-        append_images=frames[1:],
-        duration=40,
-        loop=0
-    )
-    print(f"Control animation GIF saved to {gif_path}")
+    if write_files:
+        frames[0].save(
+            gif_path,
+            save_all=True,
+            append_images=frames[1:],
+            duration=40,
+            loop=0
+        )
     return torch.stack(outputs), sampled_controls
 
 def generate_control_grid_animation(model, control_tensor, gif_path, num_frames=50, axis_1=0, axis_2=1, axis_2_values=None):

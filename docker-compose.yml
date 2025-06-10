@@ -8,6 +8,25 @@ services:
     volumes:
       - ./backend:/app
       - ./static:/app/static
+      - ./backend/ai/experiment_data:/app/experiment_data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - horde-network
+
+  lod-processor:
+    build:
+      context: ./mesh-experiments
+    container_name: horde-lod
+    volumes:
+      - ./mesh-experiments:/app
+      - ./static:/app/static
+    runtime: nvidia
     deploy:
       resources:
         reservations:
