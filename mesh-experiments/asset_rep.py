@@ -1,6 +1,7 @@
 import os
 from dataclasses import dataclass, field
 from typing import Optional, List, Tuple, Dict
+from types import MappingProxyType
 from difflib import SequenceMatcher
 
 from PIL import Image
@@ -148,11 +149,11 @@ class MeshData:
     # By vertex
     positions: torch.FloatTensor  # (N,3) vertex positions
     polyvert_attrs: Optional[torch.LongTensor] = None # (M, 1-4) index into positions, then uvs, normals, colors
-    triangles: Optional[torch.LongTensor] = None  # (F,3) triangle indices into polyverts
-
-    bone_names: Optional[List[str]] = None # List of bone names. bone_indices will map to this list.
-    bone_indices: Optional[torch.LongTensor] = None  # (N, 4) per-vertex bone indices
-    bone_weights: Optional[torch.FloatTensor] = None  # (N, 4) per-vertex bone weights
+    attr_map: Dict = field(default_factory=lambda: MappingProxyType({"positions": 0, "uvs": 1, "normals": 2, "colors": 3}))  # universal respect for this mapping is aspirational
+    triangles: Optional[torch.LongTensor] = None  # (F,3) triangle indices into polyverts\
+    normalized: bool = False  # Whether to normalize positions to unit sphere
+    mins: Optional[torch.FloatTensor] = None  # (3,) min position values
+    ranges: Optional[torch.FloatTensor] = None  # (3,) range of position values
 
     # By polygon-vertex
     uvs: Optional[torch.FloatTensor] = None  # (M,2) UV coordinates
@@ -161,9 +162,17 @@ class MeshData:
 
     base_texture_name: Optional[str] = ""
     mapped_texture: Optional[TextureData] = None  # Mapped texture data if available
+    suppress_warnings: bool = False  # Suppress warnings about missing attributes
 
     def __post_init__(self):
+        if self.normalized:
+            self.mins   = self.positions.min(dim=0).values            # (3,)
+            maxs   = self.positions.max(dim=0).values            # (3,)
+            self.ranges = (maxs - self.mins).clamp(min=1e-6)           # avoid div0
+            self.positions = (self.positions - self.mins) / self.ranges  # Normalize to [0,1]
         if self.polyvert_attrs is None:
+            if self.triangles is not None:
+                raise ValueError("polyvert_attrs must be provided if triangles are specified.")
             # Create polyvert_attrs with only position indices
             self.polyvert_attrs = torch.zeros((self.positions.shape[0], 4), dtype=torch.long, device=self.positions.device)
             pos_length = self.positions.shape[0]
@@ -182,32 +191,46 @@ class MeshData:
                     raise ValueError(f"Colors length {self.colors.shape[0]} does not match positions length {pos_length}. Please provide polyvert_attrs manually to resolve.")
                 self.polyvert_attrs[:, 3] = torch.arange(pos_length, dtype=torch.long, device=self.positions.device)
         if self.colors is not None:
-            print(f"Initial colors shape: {self.colors.shape}")
             if self.colors.shape[1] == 3:
                 # If colors are RGB, convert to RGBA by adding alpha channel
                 self.colors = torch.cat([self.colors, torch.ones((self.colors.shape[0], 1), device=self.colors.device)], dim=1)
-                print(f"Self colors shape: {self.colors.shape}")
             max_val = self.colors.max()
             if max_val > 150 and max_val <= 255:  # Arbitrary threshold for 8-bit color
                 self.colors = self.colors / 255.0
             elif max_val > 1.0 and max_val <= 150:
+                print(f"Colors appear to be in an unexpected range (max: {max_val:.2f}, min: {self.colors.min().item():.2f}, mean: {self.colors.mean().item():.2f}).")
                 raise ValueError("Colors appear to be in an unexpected range (e.g., EXR values).")
         if self.uvs is None:
-            print("Warning: UVs are not provided. Setting the 1st index of polyvert_attrs to -1.")
+            if not self.suppress_warnings:
+                print("Warning: UVs are not provided. Setting the 1st index of polyvert_attrs to -1.")
             if self.polyvert_attrs is not None:
                 self.polyvert_attrs[:, 1] = -1
         if self.normals is None:
-            print("Warning: Normals are not provided. Setting the 2nd index of polyvert_attrs to -1.")
+            if not self.suppress_warnings:
+                print("Warning: Normals are not provided. Setting the 2nd index of polyvert_attrs to -1.")
             if self.polyvert_attrs is not None:
                 self.polyvert_attrs[:, 2] = -1
         if self.colors is None:
-            print("Warning: Colors are not provided. Setting the 3rd index of polyvert_attrs to -1.")
+            if not self.suppress_warnings:
+                print("Warning: Colors are not provided. Setting the 3rd index of polyvert_attrs to -1.")
             if self.polyvert_attrs is not None:
                 self.polyvert_attrs[:, 3] = -1
         # self.dedupe_attrs()
         self.validate()
         self.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
     
+    def is_triangle_soup(self) -> bool:
+        """Triangle soup = no shared polyverts. All unique."""
+        if self.polyvert_attrs is None or self.triangles is None:
+            return False
+        # Check if all polyverts in triangles are unique
+        unique_polyverts = torch.unique(self.triangles)
+        all_uniques = (unique_polyverts.shape[0] == self.triangles.shape[0] * 3)
+        all_mapped = torch.max(self.triangles) == self.polyvert_attrs.shape[0] - 1
+        unique_positions = self.get_split_attribute("positions")
+        print(f"Unique positions: {unique_positions.shape[0]}")
+        return all_uniques and all_mapped
+
     def dedupe_attrs(self):
         """
         Remove duplicate attributes from positions, uvs, normals, and colors.
@@ -237,21 +260,6 @@ class MeshData:
               f"{self.colors.shape[0] if self.colors is not None else 0} colors.")
 
     def validate(self):
-        print(f"Number of normals: {self.normals.shape[0] if self.normals is not None else 0}")
-        print(f"number of referenced normals: {self.polyvert_attrs[:, 2].max().item() if self.normals is not None else -1}")
-        N_pos = self.positions.shape[0]
-
-        if self.bone_indices is not None:
-            assert self.bone_indices.shape == (N_pos, 4), \
-                f"bone_indices shape {self.bone_indices.shape} must match (N, 4), N={N_pos}"
-        if self.bone_weights is not None:
-            assert self.bone_weights.shape == (N_pos, 4), \
-                f"bone_weights shape {self.bone_weights.shape} must match (N, 4), N={N_pos}"
-
-        if self.bone_names is not None:
-            max_bone_index = self.bone_indices.max().item()
-            assert max_bone_index < len(self.bone_names), \
-                f"bone_indices contain {max_bone_index}, but bone_names has only {len(self.bone_names)} entries"
         if self.uvs is not None:
             assert self.uvs.shape[1] == 2, f"UVs must be (M, 2), got {self.uvs.shape}"
         if self.normals is not None:
@@ -286,47 +294,6 @@ class MeshData:
             assert self.triangles.shape[1] == 3, f"triangles must be (F, 3), got {self.triangles.shape}"
             assert self.triangles.max().item() < self.polyvert_attrs.shape[0], \
                 f"Triangle index out of range for polygon-verts"
-        print(f"MeshData '{self.name}' validated successfully: {N_pos} vertices")
-
-    def merge_positions(self, pi: int, pj: int, v_opt: torch.Tensor, k_weights: int = 4, validate:bool = False) -> int:
-        device = self.positions.device
-        v_opt = v_opt.to(device)
-        v_i = self.positions[pi]
-        v_j = self.positions[pj]
-
-        # Compute relative weighting based on proximity
-        d_i = (v_opt - v_i).norm()
-        d_j = (v_opt - v_j).norm()
-        w_i = d_j / (d_i + d_j + 1e-8)
-        w_j = 1.0 - w_i
-        
-        bone_ids = torch.cat([self.bone_indices[pi], self.bone_indices[pj]])  # [8]
-        bone_wts = torch.cat([
-            self.bone_weights[pi] * w_i,
-            self.bone_weights[pj] * w_j
-        ])  # [8]
-
-        # Merge duplicate bone ids
-        unique_ids, inverse = torch.unique(bone_ids, return_inverse=True)
-        summed_wts = torch.zeros_like(unique_ids, dtype=torch.float64, device=device)
-        summed_wts.scatter_add_(0, inverse, bone_wts)
-
-        # Top-k and normalize
-        top_wts, top_idx = torch.topk(summed_wts, k=min(k_weights, summed_wts.numel()))
-        top_ids = unique_ids[top_idx]
-        top_wts = top_wts / top_wts.sum().clamp(min=1e-8)
-
-        # Pad if fewer than k
-        if top_ids.shape[0] < k_weights:
-            pad_len = k_weights - top_ids.shape[0]
-            top_ids = torch.cat([top_ids, torch.zeros(pad_len, dtype=top_ids.dtype, device=device)])
-            top_wts = torch.cat([top_wts, torch.zeros(pad_len, dtype=top_wts.dtype, device=device)])
-        self.positions = torch.cat([self.positions, v_opt.unsqueeze(0)], dim=0)
-        self.bone_indices = torch.cat([self.bone_indices, top_ids.unsqueeze(0)], dim=0)
-        self.bone_weights = torch.cat([self.bone_weights, top_wts.unsqueeze(0)], dim=0)
-        if validate:
-            self.validate()
-        return self.positions.shape[0] - 1
     
     def remove_degens(self):
         pos_per_corner = self.polyvert_attrs[self.triangles, 0]
@@ -349,6 +316,7 @@ class MeshData:
             (attr_per_corner[:, 1] == attr_per_corner[:, 2]) |
             (attr_per_corner[:, 2] == attr_per_corner[:, 0])
         )
+
     def remove_orphans(self):
         """
         Remove vertices, UVs, normals, and colors that are not referenced by any triangle.
@@ -364,8 +332,6 @@ class MeshData:
         mask_positions = torch.zeros(self.positions.shape[0], dtype=torch.bool, device=self.positions.device)
         mask_positions[used_positions] = True
         self.positions = self.positions[mask_positions]
-        self.bone_indices = self.bone_indices[mask_positions]
-        self.bone_weights = self.bone_weights[mask_positions]
         self.polyvert_attrs[:, 0] = torch.searchsorted(used_positions.contiguous(), self.polyvert_attrs[:, 0].contiguous())
 
         if self.uvs is not None:
@@ -443,12 +409,47 @@ class MeshData:
         print(f"Ending normals for mesh '{self.name}': {self.normals.shape[0] if self.normals is not None else 0} normals")
         print(f"Ending normal indices for mesh '{self.name}': {self.polyvert_attrs[:, 2].max().item() if self.normals is not None else -1}")
         
+    def get_average_uvs(self) -> torch.FloatTensor:
+        """Compute average UVs for each vertex based on polyvert_attrs."""
+        avg_uvs = torch.zeros((self.positions.shape[0], 2), device=self.uvs.device)
+        uv_counts = torch.zeros((self.positions.shape[0], 1), device=self.uvs.device)
+
+        for poly_idx in range(self.polyvert_attrs.shape[0]):
+            vert_idx = self.polyvert_attrs[poly_idx, 0]
+            uv_idx = self.polyvert_attrs[poly_idx, 1]
+            if uv_idx < 0 or uv_idx >= self.uvs.shape[0]:
+                continue
+            avg_uvs[vert_idx] += self.uvs[uv_idx]
+            uv_counts[vert_idx] += 1
+
+        avg_uvs = avg_uvs / uv_counts.clamp(min=1e-8)
+        return avg_uvs
+
+    def get_vertex_triangles(self) -> torch.LongTensor:
+        """
+        Maps polyverts to position indices for vertex-based workflows.
+        """
+        if self.polyvert_attrs is None or self.polyvert_attrs.shape[1] < 1:
+            raise ValueError("polyvert_attrs must be defined with at least one column for position indices.")
+        return self.polyvert_attrs[:, 0][self.triangles]
+
+    def get_split_attribute(self, attr: str):
+        """
+        Returns the split (per-polyvert) version of the specified attribute.
+        attr: one of "positions", "uvs", "normals", "colors"
+        """
+        if self.polyvert_attrs is None:
+            raise ValueError("polyvert_attrs must be defined to split attributes.")
+        if attr not in self.attr_map:
+            raise ValueError(f"Unknown attribute '{attr}'. Must be one of {list(self.attr_map.keys())}.")
+        indices = self.polyvert_attrs[:, self.attr_map[attr]]
+        return getattr(self, attr, None)[indices]
 
     def to(self, device: torch.device):
         """Move all tensors to `device`."""
         self.positions = self.positions.to(device)
         optional_attributes = [
-            "polyvert_attrs", "triangles", "bone_indices", "bone_weights",
+            "polyvert_attrs", "triangles",
             "uvs", "normals", "colors"
         ]
         for attr in optional_attributes:

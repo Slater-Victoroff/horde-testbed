@@ -12,7 +12,23 @@ RUN apt-get update \
        libassimp-dev \
        git \
        wget \
+       cmake \
+       build-essential \
+       ninja-build \
  && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --upgrade pip
+RUN pip3 install "numpy<2"
+RUN pip3 install torch==2.0.1+cu118 torchvision==0.15.2+cu118 \
+    --extra-index-url https://download.pytorch.org/whl/cu118
+
+RUN pip3 install fvcore iopath
+RUN git clone https://github.com/NVIDIA/cub.git /opt/cub
+ENV CUB_HOME=/opt/cub
+ENV FORCE_CUDA=1
+ENV TORCH_CUDA_ARCH_LIST="7.5"
+
+RUN pip3 install "git+https://github.com/facebookresearch/pytorch3d.git@stable"
 
 # 2) Python deps
 RUN pip3 install \
@@ -20,9 +36,12 @@ RUN pip3 install \
        trimesh \
        pillow \
        pyassimp \
-       usd-core
-
-RUN pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable"
+       usd-core \
+       open3d \
+       pygltflib \
+       imageio \
+       lpips \
+       piq
 
 RUN wget https://damassets.autodesk.net/content/dam/autodesk/www/files/fbx202037_fbxsdk_gcc_linux.tar.gz -O /tmp/FBXSDK_linux.tgz
 RUN mkdir -p /opt/fbxsdk && \

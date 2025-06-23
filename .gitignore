@@ -38,6 +38,7 @@ backend/ai/experiment_data/
 backend/ai/final_data/
 backend/ai/ref_data/
 backend/ai/gauge_dir
+mesh-experiments/debug_renders
 certbot/
 
 # Ignore large temporary data

@@ -3,14 +3,16 @@ from typing import List, Dict
 from difflib import SequenceMatcher
 
 import torch
+import trimesh
 import numpy as np
 import fbx
 from fbx import FbxManager, FbxImporter, FbxScene, FbxMesh
+from PIL import Image
 
 from asset_rep import MeshData
 
 
-def load_fbx_to_meshdata(fbx_path: str):
+def load_fbx_to_meshdata(fbx_path: str, normalize: bool = True) -> List[MeshData]:
     manager = FbxManager.Create()
     importer = FbxImporter.Create(manager, "")
     scene = FbxScene.Create(manager, "Scene")
@@ -29,31 +31,27 @@ def load_fbx_to_meshdata(fbx_path: str):
             name = node.GetName()
             mesh = node.GetMesh()
             positions = _get_fbx_positions(mesh)
-            bone_indices, bone_weights, unique_bone_names = _get_bone_data(mesh)
-            uvs = _get_fbx_uvs(mesh)
-            normals = _get_fbx_normals(mesh)
-
             faces = _get_position_faces(mesh)
-            uv_faces = _get_uv_faces(mesh)
-            norm_faces = _get_normal_faces(mesh)
+            uvs, uv_faces = _get_fbx_uv_data(mesh) if mesh.GetElementUVCount() > 0 else (None, None)
+            normals, norm_faces = _get_fbx_normal_data(mesh) if  mesh.GetElementNormalCount() > 0 else (None, None)
+            colors, color_faces = _get_fbx_color_data(mesh) if mesh.GetElementVertexColorCount() > 0 else (None, None)
+
             texture = _get_base_texture(mesh)
             mesh_data = MeshData(
                 name=name,
                 positions=positions,
-                bone_names=unique_bone_names,
-                bone_indices=bone_indices,
-                bone_weights=bone_weights,
                 uvs = uvs,
                 normals=normals,
-                colors=None,
+                colors=colors,
                 polyvert_attrs= _build_polyvert_attrs(
                     faces=faces,
                     uv_faces=uv_faces,
                     norm_faces=norm_faces,
-                    color_faces=None
+                    color_faces=color_faces
                 ),
                 triangles=_build_triangle_indices(faces),
                 base_texture_name=texture,
+                normalized=normalize
             )
             meshes.append(mesh_data)
     base_textures = [mesh.base_texture_name for mesh in meshes if mesh.base_texture_name]
@@ -117,174 +115,106 @@ def _get_position_faces(mesh: FbxMesh):
     return torch.tensor(faces, dtype=torch.long, device=device)
 
 
-def _get_bone_data(mesh: FbxMesh, max_influences: int = 4):
-    bone_names = []
-    bone_weights = []
-    if mesh.GetDeformerCount() == 1:
-        deformer = mesh.GetDeformer(0, fbx.FbxDeformer.EDeformerType.eSkin)
-        for i in range(mesh.GetControlPointsCount()):
-            indices = []
-            weights = []
-            for j in range(deformer.GetClusterCount()):
-                cluster = deformer.GetCluster(j)
-                for index, weight in zip(cluster.GetControlPointIndices(), cluster.GetControlPointWeights()):
-                    if index == i:
-                        indices.append(cluster.GetLink().GetName())
-                        weights.append(weight)
-                        
-            bone_names.append(indices[:max_influences])
-            bone_weights.append(weights[:max_influences])
-
-    # Process bone names to get unique names and replace with indices
-    unique_bone_names = list(set(name for names in bone_names for name in names))
-    bone_indices = [
-        [unique_bone_names.index(name) for name in names]
-        for names in bone_names
-    ]
-
-    # Convert to tensors
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    # Pad bone_indices and bone_weights to ensure consistent length (max_influences)
-    padded_bone_indices = [indices + [-1] * (max_influences - len(indices)) for indices in bone_indices]
-    padded_bone_weights = [weights + [0.0] * (max_influences - len(weights)) for weights in bone_weights]
-
-    bone_indices_tensor = torch.tensor(padded_bone_indices, dtype=torch.long, device=device)
-    bone_weights_tensor = torch.tensor(padded_bone_weights, dtype=torch.float64, device=device)
-
-    return bone_indices_tensor, bone_weights_tensor, unique_bone_names
-
-
-def _get_fbx_uvs(mesh: FbxMesh):
-    uvs = []
-    if mesh.GetElementUVCount() == 1:
-        uv_element = mesh.GetElementUV(0)
-        if uv_element.GetMappingMode() == uv_element.EMappingMode.eByPolygonVertex:
-            if uv_element.GetReferenceMode() == uv_element.EReferenceMode.eDirect:
-                for i in range(mesh.GetPolygonVertexCount()):
-                    uv = uv_element.GetDirectArray().GetAt(i)
-                    uvs.append([uv[0], uv[1]])
-            elif uv_element.GetReferenceMode() == uv_element.EReferenceMode.eIndexToDirect:
-                print(f"$" * 50)
-                for i in range(mesh.GetPolygonVertexCount()):
-                    idx = uv_element.GetIndexArray().GetAt(i)
-                    uv = uv_element.GetDirectArray().GetAt(idx)
-                    uvs.append([uv[0], uv[1]])
-            else:
-                raise ValueError(f"Unsupported UV reference mode: {uv_element.GetReferenceMode()}")
-        else:
-            raise ValueError(f"Unsupported UV mapping mode: {uv_element.GetMappingMode()}")
-    else:
-        raise ValueError(f"Unsupported number of UV elements: {mesh.GetElementUVCount()}")
-
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    return torch.tensor(uvs, dtype=torch.float64, device=device)
-
-
-def _get_uv_faces(mesh: FbxMesh):
-    """
-    Build an (F,3) tensor of UV‐indices per face, handling both eDirect and eIndexToDirect.
-    Assumes MappingMode = eByPolygonVertex.
-    """
+def _get_fbx_uv_data(mesh: FbxMesh):
+    print("Extracting UVs from mesh...")
     if mesh.GetElementUVCount() != 1:
-        raise ValueError(f"Unsupported number of UV elements: {mesh.GetElementUVCount()}")
+        raise ValueError(f"Expected 1 UV element, got {mesh.GetElementUVCount()}")
 
     uv_element = mesh.GetElementUV(0)
 
-    # Must be “by polygon‐vertex” to match how we flattened faces.
     if uv_element.GetMappingMode() != uv_element.EMappingMode.eByPolygonVertex:
         raise ValueError(f"Unsupported UV mapping mode: {uv_element.GetMappingMode()}")
 
     ref_mode = uv_element.GetReferenceMode()
-    poly_count = mesh.GetPolygonCount()
-    uv_faces = []
+    poly_uvs = []
 
-    # A running counter over “polygon‐vertices” (0..(F*3 − 1)).
-    polyvert_counter = 0
-
-    for i in range(poly_count):
-        face_uvs = []
-        for j in range(mesh.GetPolygonSize(i)):
-            if ref_mode == uv_element.EReferenceMode.eDirect:
-                # In eDirect, DirectArray holds one UV per poly‐vertex in sequence.
-                idx = polyvert_counter
-                polyvert_counter += 1
-            else:
-                # eIndexToDirect: look up index in IndexArray, then later
-                # you’ll use that index to read DirectArray when reconstructing UV coords.
-                idx = uv_element.GetIndexArray().GetAt(polyvert_counter)
-                polyvert_counter += 1
-
-            face_uvs.append(idx)
-        uv_faces.append(face_uvs)
-
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    return torch.tensor(uv_faces, dtype=torch.long, device=device)
-
-
-def _get_fbx_normals(mesh: FbxMesh):
-    normals = []
-    if mesh.GetElementNormalCount() == 1:
-        normal_element = mesh.GetElementNormal(0)
-        if normal_element.GetMappingMode() == normal_element.EMappingMode.eByPolygonVertex:
-            if normal_element.GetReferenceMode() == normal_element.EReferenceMode.eDirect:
-                for i in range(mesh.GetPolygonVertexCount()):
-                    normal = normal_element.GetDirectArray().GetAt(i)
-                    normals.append([normal[0], normal[1], normal[2]])
-            elif normal_element.GetReferenceMode() == normal_element.EReferenceMode.eIndexToDirect:
-                print("@" * 50)
-                for i in range(mesh.GetPolygonVertexCount()):
-                    idx = normal_element.GetIndexArray().GetAt(i)
-                    normal = normal_element.GetDirectArray().GetAt(idx)
-                    normals.append([normal[0], normal[1], normal[2]])
-            else:
-                raise ValueError(f"Unsupported normal reference mode: {normal_element.GetReferenceMode()}")
+    for i in range(mesh.GetPolygonVertexCount()):
+        if ref_mode == uv_element.EReferenceMode.eDirect:
+            uv = uv_element.GetDirectArray().GetAt(i)
+        elif ref_mode == uv_element.EReferenceMode.eIndexToDirect:
+            idx = uv_element.GetIndexArray().GetAt(i)
+            uv = uv_element.GetDirectArray().GetAt(idx)
         else:
-            raise ValueError(f"Unsupported normal mapping mode: {normal_element.GetMappingMode()}")
-    else:
-        raise ValueError(f"Unsupported number of normal elements: {mesh.GetElementNormalCount()}")
+            raise ValueError(f"Unsupported UV reference mode: {ref_mode}")
+        poly_uvs.append((uv[0], uv[1]))
+
+    # Deduplicate UVs and build remapping
+    unique_uvs, inverse_indices = np.unique(poly_uvs, axis=0, return_inverse=True)
+    uv_faces = inverse_indices.reshape((-1, 3))  # assuming triangulated input
+
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    return torch.tensor(normals, dtype=torch.float64, device=device)
+    return (
+        torch.tensor(unique_uvs, dtype=torch.float32, device=device),
+        torch.tensor(uv_faces, dtype=torch.long, device=device)
+    )
 
 
-def _get_normal_faces(mesh: FbxMesh):
-    """
-    Build an (F,3) tensor of normal‐indices per face, matching _get_fbx_normals().
-    Works for MappingMode=eByPolygonVertex with either eDirect or eIndexToDirect.
-    """
+def _get_fbx_normal_data(mesh: FbxMesh):
+    print("Extracting normals from mesh...")
     if mesh.GetElementNormalCount() != 1:
-        raise ValueError(f"Unsupported number of normal elements: {mesh.GetElementNormalCount()}")
+        raise ValueError(f"Expected 1 normal element, got {mesh.GetElementNormalCount()}")
 
     normal_element = mesh.GetElementNormal(0)
 
-    # Must be ByPolygonVertex
     if normal_element.GetMappingMode() != normal_element.EMappingMode.eByPolygonVertex:
         raise ValueError(f"Unsupported normal mapping mode: {normal_element.GetMappingMode()}")
 
     ref_mode = normal_element.GetReferenceMode()
-    poly_count = mesh.GetPolygonCount()
-    norm_faces = []
+    poly_normals = []
 
-    # Keep a running counter for "direct" mode:
-    polyvert_counter = 0
+    for i in range(mesh.GetPolygonVertexCount()):
+        if ref_mode == normal_element.EReferenceMode.eDirect:
+            normal = normal_element.GetDirectArray().GetAt(i)
+        elif ref_mode == normal_element.EReferenceMode.eIndexToDirect:
+            idx = normal_element.GetIndexArray().GetAt(i)
+            normal = normal_element.GetDirectArray().GetAt(idx)
+        else:
+            raise ValueError(f"Unsupported normal reference mode: {ref_mode}")
+        poly_normals.append((normal[0], normal[1], normal[2]))
 
-    for i in range(poly_count):
-        face_normals = []
-        for j in range(mesh.GetPolygonSize(i)):
-            if ref_mode == normal_element.EReferenceMode.eDirect:
-                # In eDirect, DirectArray holds one normal per poly-vert in order.
-                idx = polyvert_counter
-                polyvert_counter += 1
-            else:
-                # eIndexToDirect: look up the index in IndexArray first
-                # (IndexArray is length = polygonVertexCount)
-                idx = normal_element.GetIndexArray().GetAt(polyvert_counter)
-                polyvert_counter += 1
-
-            face_normals.append(idx)
-        norm_faces.append(face_normals)
+    # Deduplicate normals and build remapping
+    unique_normals, inverse_indices = np.unique(poly_normals, axis=0, return_inverse=True)
+    norm_faces = inverse_indices.reshape((-1, 3))  # assuming triangulated input
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    return torch.tensor(norm_faces, dtype=torch.long, device=device)
+    return (
+        torch.tensor(unique_normals, dtype=torch.float32, device=device),
+        torch.tensor(norm_faces, dtype=torch.long, device=device)
+    )
+
+
+def _get_fbx_color_data(mesh: FbxMesh):
+    print("Extracting vertex colors from mesh...")
+    if mesh.GetElementVertexColorCount() != 1:
+        raise ValueError(f"Expected 1 vertex color element, got {mesh.GetElementVertexColorCount()}")
+
+    color_element = mesh.GetElementVertexColor(0)
+
+    if color_element.GetMappingMode() != color_element.EMappingMode.eByPolygonVertex:
+        raise ValueError(f"Unsupported vertex color mapping mode: {color_element.GetMappingMode()}")
+
+    ref_mode = color_element.GetReferenceMode()
+    poly_colors = []
+
+    for i in range(mesh.GetPolygonVertexCount()):
+        if ref_mode == color_element.EReferenceMode.eDirect:
+            color = color_element.GetDirectArray().GetAt(i)
+        elif ref_mode == color_element.EReferenceMode.eIndexToDirect:
+            idx = color_element.GetIndexArray().GetAt(i)
+            color = color_element.GetDirectArray().GetAt(idx)
+        else:
+            raise ValueError(f"Unsupported vertex color reference mode: {ref_mode}")
+        poly_colors.append((color.mRed, color.mGreen, color.mBlue, color.mAlpha))
+
+    # Deduplicate colors and build remapping
+    unique_colors, inverse_indices = np.unique(poly_colors, axis=0, return_inverse=True)
+    color_faces = inverse_indices.reshape((-1, 3))  # assuming triangulated input
+
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    return (
+        torch.tensor(unique_colors, dtype=torch.float32, device=device),
+        torch.tensor(color_faces, dtype=torch.long, device=device)
+    )
 
 
 def _get_base_texture(mesh: FbxMesh):
@@ -355,85 +285,6 @@ def match_textures(source_names: List[str], local_dir: List[str], min_ratio: flo
             used_a.add(a)
     print(mapping)
     return list(mapping.values())
-
-
-def _rebuild_skin_from_meshdata(
-    fbx_mesh: fbx.FbxMesh,
-    mesh_data: "MeshData",
-    scene_root: fbx.FbxNode,
-    manager: fbx.FbxManager
-):
-    """
-    Completely discards any existing FbxSkin on fbx_mesh and builds a new one 
-    using mesh_data.bone_names, bone_indices, and bone_weights.
-
-    - fbx_mesh: the FbxMesh to re‐skin
-    - mesh_data.bone_names: List[str], the bone names (matches FBX node names)
-    - mesh_data.bone_indices: LongTensor[N,4], per‐vertex bone indices
-    - mesh_data.bone_weights: FloatTensor[N,4], per‐vertex bone weights
-    - scene_root: typically scene.GetRootNode(), used to find bone nodes
-    """
-    # 1) If fbx_mesh already has a FbxSkin deformer, remove it.
-    num_deformers = fbx_mesh.GetDeformerCount()
-    print(f"Removing {num_deformers} existing FbxSkin deformers from mesh '{fbx_mesh.GetName()}'.")
-    for i in reversed(range(num_deformers)):
-        deformer = fbx_mesh.GetDeformer(i)
-        for cidx in reversed(range(deformer.GetClusterCount())):
-            cluster = deformer.GetCluster(cidx)
-            deformer.RemoveCluster(cluster)
-        fbx_mesh.RemoveDeformer(i)
-
-    # 2) Create a new FbxSkin and attach to fbx_mesh
-    new_skin = fbx.FbxSkin.Create(manager, "")
-    fbx_mesh.AddDeformer(new_skin)
-
-    # 3) Build a map from bone_name -> FbxNode (skeleton). If any bone not found, warn.
-    bone_node_map = {}
-    for bone_name in mesh_data.bone_names:
-        bone_node = _find_node_by_name(scene_root, bone_name)
-        if bone_node.GetParent() is None:
-            print(f"[Fixing] Adding bone node '{bone_node.GetName()}' to scene root")
-            scene_root.AddChild(bone_node)
-        if not bone_node:
-            print(f"[Warning] Could not find bone node '{bone_name}' in FBX scene.")
-            continue
-        bone_node_map[bone_name] = bone_node
-
-    # 4) For each bone, create one cluster and add it to the skin.
-    #    We’ll store clusters in a list so we can add control‐point indices afterward.
-    clusters = []
-    for bone_idx, bone_name in enumerate(mesh_data.bone_names):
-        bone_node = bone_node_map.get(bone_name)
-
-        cluster = fbx.FbxCluster.Create(manager, "")
-        cluster.SetLink(bone_node)
-        cluster.SetTransformMatrix(fbx_mesh.GetNode().EvaluateGlobalTransform())
-        cluster.SetTransformLinkMatrix(bone_node.EvaluateGlobalTransform())
-        cluster.SetLinkMode(fbx.FbxCluster.ELinkMode.eNormalize)
-
-        new_skin.AddCluster(cluster)
-        clusters.append((bone_idx, cluster))
-
-    # 5) Now assign control-point indices + weights to each cluster:
-    # Assume all control points already exist; we're adding bone weights and indices to them.
-    num_points = mesh_data.positions.shape[0]
-    bone_indices = mesh_data.bone_indices.cpu().tolist()  # list of [i0, i1, i2, i3]
-    bone_weights = mesh_data.bone_weights.cpu().tolist()  # list of [w0, w1, w2, w3]
-
-    # Build a quick lookup: bone_idx -> cluster
-    boneidx_to_cluster = {bi: c for (bi, c) in clusters}
-
-    for cp_idx in range(num_points):
-        idx_list = bone_indices[cp_idx]   # e.g. [2, 5, 7, 0]
-        w_list   = bone_weights[cp_idx]   # e.g. [0.72, 0.28, 0.0, 0.0]
-
-        for slot in range(len(idx_list)):
-            bidx = idx_list[slot]
-            wgt  = w_list[slot]
-            if wgt > 0.0:  # Only process weights greater than 0
-                cluster = boneidx_to_cluster.get(bidx)
-                if cluster:
-                    cluster.AddControlPointIndex(cp_idx, wgt)
 
 
 def write_meshdata_list_to_fbx(
@@ -591,7 +442,53 @@ def _replace_fbxmesh_with_meshdata(
 
         fbx_mesh.EndPolygon()
     fbx_mesh.BuildMeshEdgeArray()
-    _rebuild_skin_from_meshdata(fbx_mesh, mesh_data, scene_root, manager)
+
+
+def meshdata_to_glb(
+    mesh_data: "MeshData",
+    out_glb_path: str
+):
+    if mesh_data.normalized:
+        positions = mesh_data.get_split_attribute("positions") * mesh_data.ranges + mesh_data.mins
+    else:
+        positions = mesh_data.get_split_attribute("positions")
+    mesh = trimesh.Trimesh(
+        vertices=positions.cpu().numpy(),
+        faces=mesh_data.triangles.cpu().numpy(),
+        process=False
+    )
+    verts_np = positions.cpu().numpy()
+    uvs_np = mesh_data.get_split_attribute("uvs").cpu().numpy()
+    faces_np = mesh_data.triangles.cpu().numpy()
+
+    uvs = mesh_data.get_split_attribute("uvs").cpu().numpy()
+    img = mesh_data.mapped_texture.image.cpu().numpy()
+
+        # Sanity checks
+    print(f"[GLB] verts: {verts_np.shape}")
+    print(f"[GLB] uvs: {uvs_np.shape}")
+    print(f"[GLB] faces: {faces_np.shape}")
+    print(f"[GLB] faces.min(): {faces_np.min()}  faces.max(): {faces_np.max()}")
+
+    if verts_np.shape[0] != uvs_np.shape[0]:
+        print("[WARN] Vertex count does not match UV count. This will break UV mapping.")
+    if faces_np.max() >= verts_np.shape[0]:
+        print("[ERROR] Face index out of bounds for vertex array!")
+    if np.any(np.isnan(uvs_np)) or np.any(np.isinf(uvs_np)):
+        print("[ERROR] UVs contain NaN or Inf values.")
+    if np.any((uvs_np < -1e-3) | (uvs_np > 1 + 1e-3)):
+        print("[WARN] UVs fall outside expected [0, 1] range.")
+
+    img8 = (img * 255).astype(np.uint8) if img.dtype != np.uint8 else img
+    img_pil = Image.fromarray(img8)
+    mesh.visual = trimesh.visual.TextureVisuals(
+        uv=uvs,
+        image=img_pil
+    )
+
+    glb_bytes = mesh.export(file_type='glb')
+    with open(out_glb_path, 'wb') as f:
+        f.write(glb_bytes)
 
 
 def export_meshdata_list(meshdata_list, out_fbx_path, export_ascii=False):
@@ -599,30 +496,38 @@ def export_meshdata_list(meshdata_list, out_fbx_path, export_ascii=False):
     scene = fbx.FbxScene.Create(manager, "ExportScene")
     root = scene.GetRootNode()
 
-    # 1. Create all unique bones as FbxNodes (flat under root for now)
-    bone_nodes = {}
-    for mesh in meshdata_list:
-        if mesh.bone_names is not None:
-            for bone_name in mesh.bone_names:
-                if bone_name not in bone_nodes:
-                    node = fbx.FbxNode.Create(scene, bone_name)
-                    # Optional: node.SetNodeAttribute(...) to make it a limb node, etc.
-                    root.AddChild(node)
-                    bone_nodes[bone_name] = node
-
-    # 2. For each mesh, build FbxMesh, FbxNode, add to root
     for mesh in meshdata_list:
         fbx_mesh = fbx.FbxMesh.Create(scene, mesh.name)
         node = fbx.FbxNode.Create(scene, mesh.name)
         node.SetNodeAttribute(fbx_mesh)
         root.AddChild(node)
 
+        positions = mesh.positions
+        if mesh.normalized:
+            positions = mesh.positions * mesh.ranges + mesh.mins
+        positions = positions.cpu().float()  # Ensure positions are on CPU and float
         # Positions
-        fbx_mesh.InitControlPoints(mesh.positions.shape[0])
-        for idx in range(mesh.positions.shape[0]):
-            x, y, z = mesh.positions[idx].tolist()
+        fbx_mesh.InitControlPoints(positions.shape[0])
+        for idx in range(positions.shape[0]):
+            x, y, z = positions[idx].tolist()
             fbx_mesh.SetControlPointAt(fbx.FbxVector4(x, y, z), idx)
 
+        if mesh.colors is not None:
+            if fbx_mesh.GetElementVertexColorCount() > 0:
+                fbx_mesh.RemoveElementVertexColor(fbx_mesh.GetElementVertexColor(0))
+            if mesh.colors.shape[0] != positions.shape[0]:
+                raise ValueError("Number of vertex colors does not match number of positions.")
+            if fbx_mesh.GetLayerCount() == 0:
+                fbx_mesh.CreateLayer()
+            
+            vc_layer = fbx.FbxLayerElementVertexColor.Create(fbx_mesh, "VertexColor")
+            vc_layer.SetMappingMode(fbx.FbxLayerElement.EMappingMode.eByControlPoint)
+            vc_layer.SetReferenceMode(fbx.FbxLayerElement.EReferenceMode.eDirect)
+
+            for idx in range(positions.shape[0]):
+                r, g, b, a = mesh.colors[idx].tolist()
+                vc_layer.GetDirectArray().Add(fbx.FbxColor(r, g, b, a))
+            fbx_mesh.GetLayer(0).SetVertexColors(vc_layer)
         # Faces (triangles) Technically optional
         if mesh.triangles is not None:
             triangles = mesh.triangles.cpu().tolist()
@@ -633,30 +538,6 @@ def export_meshdata_list(meshdata_list, out_fbx_path, export_ascii=False):
                     pos_idx, _, _, _ = poly_attrs[pv_idx]
                     fbx_mesh.AddPolygon(pos_idx)
                 fbx_mesh.EndPolygon()
-
-        if mesh.bone_names is not None:
-            skin = fbx.FbxSkin.Create(manager, "")
-            fbx_mesh.AddDeformer(skin)
-            clusters = []
-            for bone_idx, bone_name in enumerate(mesh.bone_names):
-                bone_node = bone_nodes[bone_name]
-                cluster = fbx.FbxCluster.Create(manager, "")
-                cluster.SetLink(bone_node)
-                cluster.SetLinkMode(fbx.FbxCluster.ELinkMode.eNormalize)
-                skin.AddCluster(cluster)
-                clusters.append(cluster)
-
-            # Add skin weights (same as before)
-            bone_indices = mesh.bone_indices.cpu().tolist()
-            bone_weights = mesh.bone_weights.cpu().tolist()
-            for cp_idx in range(mesh.positions.shape[0]):
-                idx_list = bone_indices[cp_idx]
-                w_list = bone_weights[cp_idx]
-                for slot in range(len(idx_list)):
-                    bidx = idx_list[slot]
-                    wgt = w_list[slot]
-                    if wgt > 0.0 and 0 <= bidx < len(clusters):
-                        clusters[bidx].AddControlPointIndex(cp_idx, wgt)
 
     # Export!
     exporter = fbx.FbxExporter.Create(manager, "")
@@ -682,5 +563,4 @@ if __name__ == "__main__":
     test = load_fbx_to_meshdata("static/meshes/Horse.fbx")
     new_meshes = []
     for mesh in test:
-        new_meshes.append(optimize_mesh(mesh))
-    export_meshdata_list(new_meshes, "static/meshes/Horse_optimized.fbx", export_ascii=False)
+        meshdata_to_glb(mesh, f"static/meshes/{mesh.name}.glb")
