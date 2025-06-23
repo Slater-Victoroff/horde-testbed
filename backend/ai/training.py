@@ -1,66 +1,48 @@
+import sys
 import json
+import time
+import traceback
 from datetime import datetime
 from pathlib import Path
+import multiprocessing as mp
+from multiprocessing import Process
+from collections import deque
 
 import torch
-import torch.nn as nn
 
-from full_image import RGBImageModel, train_image_model
 from single_pixel import train_vfx_model
-import argparse
-
-class WeightedMSELoss(nn.Module):
-    def __init__(self, weight_exponent=2.0):
-        super().__init__()
-        self.mse = nn.MSELoss(reduction='none')  # Compute element-wise MSE
-        self.weight_exponent = weight_exponent
-
-    def forward(self, reconstructed, target):
-        # Compute the mean RGB value for the target
-        mean_rgb = target.mean(dim=0, keepdim=True)
-
-        # Compute weights based on distance from the mean
-        weights = torch.norm(target - mean_rgb, dim=1, keepdim=True)  # L2 norm (distance from mean)
-
-        # Normalize weights to [0, 1]
-        weights = (weights / weights.max()) ** self.weight_exponent
-
-        # Compute weighted MSE loss
-        loss = self.mse(reconstructed, target)
-        weighted_loss = (weights * loss).mean()  # Apply weights and average
-        return weighted_loss
+from gauges import train_drill_model
+from experiments import EXPERIMENTS
 
 
-class GammaCorrectedMSELoss(nn.Module):
-    def __init__(self, gamma=2.2):
-        super().__init__()
-        self.gamma = gamma
-        self.mse = nn.MSELoss()
-
-    def forward(self, reconstructed, target):
-        # Apply gamma correction
-        reconstructed_gamma = torch.pow(reconstructed, self.gamma)
-        target_gamma = torch.pow(target, self.gamma)
-        return self.mse(reconstructed_gamma, target_gamma)
-
-
-class FrequencyLoss(nn.Module):
-    def __init__(self, weight=1.0):
-        super().__init__()
-        self.weight = weight
-
-    def forward(self, reconstructed, target):
-        # Compute the Fourier transform of the reconstructed and target images
-        reconstructed_fft = torch.fft.fft2(reconstructed, norm="ortho")
-        target_fft = torch.fft.fft2(target, norm="ortho")
-
-        # Compute the magnitude of the frequency components
-        reconstructed_mag = torch.abs(reconstructed_fft)
-        target_mag = torch.abs(target_fft)
-
-        # Compute the loss as the mean squared error of the magnitudes
-        freq_loss = torch.mean((reconstructed_mag - target_mag) ** 2)
-        return self.weight * freq_loss
+def run_single_job(job, static_dir):
+    try:
+        name = job["name"]
+        dataset_path = static_dir / job["dataset"]
+        model_type = job.get("model_type", "vfx")
+        if model_type == "vfx":
+            train_job = train_vfx_model
+        elif model_type == "drill":
+            train_job = train_drill_model
+        else:
+            raise ValueError(f"Unknown model type: {model_type}")
+        
+        decoder_config = job["config"]
+        print(f"Starting VFX Model: {name}")
+        train_job(
+            image_dir=dataset_path,
+            device=torch.device("cuda"),
+            experiment_name=name,
+            decoder_config=decoder_config,
+        )
+        print(f"Finished: {name}")
+        return "done"
+    except RuntimeError as e:
+        if "out of memory" in str(e).lower():
+            print(f"error: {e}")
+            print(f"OOM on {name}")
+            sys.exit(42)
+        raise
 
 
 def main():
@@ -68,22 +50,51 @@ def main():
     print(f"Using device: {device}")
 
     STATIC_DIR = Path("/app/static")
-    results_dir = Path("results")
-    results_dir.mkdir(exist_ok=True)
 
-    # criterion = GammaCorrectedMSELoss().to(device)
-    criterion = FrequencyLoss().to(device)
-    # criterion = nn.MSELoss().to(device)
-    model = train_vfx_model(STATIC_DIR / "VFX/hollow-flame/", criterion, device=device, experiment_name="freq-loss")
-    
-    # Save model state
-    model_path = results_dir / f"vfx_model_combined{datetime.now().strftime('%Y%m%d_%H%M%S')}.pth"
-    torch.save(model.state_dict(), model_path)
+    queue = deque()
+    for exp in EXPERIMENTS:
+        queue.append(exp)
+    running = []
+    mem_full = False
 
-    # model.save_as_glsl(results_dir, test_images)
-    
-    print(f"Model saved to {model_path}")
-    print(f"GLSL shader saved to {results_dir}")
+    def launch_next():
+        nonlocal mem_full
+        if not queue or mem_full:
+            return
+        job = queue.popleft()
+        p = Process(target=run_single_job, args=(job, STATIC_DIR))
+        try:
+            p.start()
+            running.append((p, job))
+            time.sleep(5)
+            launch_next()
+        except RuntimeError as e:
+            raise
+
+    launch_next()
+
+    # Monitor loop
+    while queue or any(p.is_alive() for p, _ in running):
+        still_running = []
+        for p, job in running:
+            if p.is_alive():
+                still_running.append((p, job))
+            else:
+                exitcode = p.exitcode
+                if exitcode == 42:
+                    print(f"Job {job['name']} OOM, requeuing.")
+                    mem_full = True
+                    queue.appendleft(job)
+                elif exitcode != 0:
+                    print(f"Job {job['name']} exited with code {exitcode}, requeuing.")
+                    queue.append(job)  # non-oom failure = back of the queue
+                else:
+                    print(f"Job {job['name']} completed successfully.")
+                    mem_full = False
+                    launch_next()
+        running[:] = still_running
+        time.sleep(5)
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
     main()

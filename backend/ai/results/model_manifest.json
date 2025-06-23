@@ -1,0 +1,125 @@
+{
+  "layers": [
+    {
+      "name": "decoder.time_embed.0.weight",
+      "shape": [
+        32,
+        8
+      ],
+      "offset": 0,
+      "size": 256
+    },
+    {
+      "name": "decoder.time_embed.0.bias",
+      "shape": [
+        32
+      ],
+      "offset": 1024,
+      "size": 32
+    },
+    {
+      "name": "decoder.pos_embed.0.weight",
+      "shape": [
+        32,
+        16
+      ],
+      "offset": 1152,
+      "size": 512
+    },
+    {
+      "name": "decoder.pos_embed.0.bias",
+      "shape": [
+        32
+      ],
+      "offset": 3200,
+      "size": 32
+    },
+    {
+      "name": "decoder.film.weight",
+      "shape": [
+        64,
+        64
+      ],
+      "offset": 3328,
+      "size": 4096
+    },
+    {
+      "name": "decoder.film.bias",
+      "shape": [
+        64
+      ],
+      "offset": 19712,
+      "size": 64
+    },
+    {
+      "name": "decoder.layers.0.weight",
+      "shape": [
+        32,
+        3
+      ],
+      "offset": 19968,
+      "size": 96
+    },
+    {
+      "name": "decoder.layers.0.bias",
+      "shape": [
+        32
+      ],
+      "offset": 20352,
+      "size": 32
+    },
+    {
+      "name": "decoder.layers.2.weight",
+      "shape": [
+        32,
+        32
+      ],
+      "offset": 20480,
+      "size": 1024
+    },
+    {
+      "name": "decoder.layers.2.bias",
+      "shape": [
+        32
+      ],
+      "offset": 24576,
+      "size": 32
+    },
+    {
+      "name": "decoder.layers.4.weight",
+      "shape": [
+        32,
+        32
+      ],
+      "offset": 24704,
+      "size": 1024
+    },
+    {
+      "name": "decoder.layers.4.bias",
+      "shape": [
+        32
+      ],
+      "offset": 28800,
+      "size": 32
+    },
+    {
+      "name": "decoder.layers.6.weight",
+      "shape": [
+        4,
+        32
+      ],
+      "offset": 28928,
+      "size": 128
+    },
+    {
+      "name": "decoder.layers.6.bias",
+      "shape": [
+        4
+      ],
+      "offset": 29440,
+      "size": 4
+    }
+  ],
+  "dtype": "float32",
+  "endianness": "little"
+}

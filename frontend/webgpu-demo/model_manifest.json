@@ -1,0 +1,135 @@
+{
+  "layers": [
+    {
+      "name": "shared_latent",
+      "shape": [
+        240,
+        128,
+        4
+      ],
+      "offset": 0,
+      "size": 122880
+    },
+    {
+      "name": "decoder.time_embed.0.weight",
+      "shape": [
+        32,
+        8
+      ],
+      "offset": 491520,
+      "size": 256
+    },
+    {
+      "name": "decoder.time_embed.0.bias",
+      "shape": [
+        32
+      ],
+      "offset": 492544,
+      "size": 32
+    },
+    {
+      "name": "decoder.pos_embed.0.weight",
+      "shape": [
+        32,
+        16
+      ],
+      "offset": 492672,
+      "size": 512
+    },
+    {
+      "name": "decoder.pos_embed.0.bias",
+      "shape": [
+        32
+      ],
+      "offset": 494720,
+      "size": 32
+    },
+    {
+      "name": "decoder.film.weight",
+      "shape": [
+        128,
+        64
+      ],
+      "offset": 494848,
+      "size": 8192
+    },
+    {
+      "name": "decoder.film.bias",
+      "shape": [
+        128
+      ],
+      "offset": 527616,
+      "size": 128
+    },
+    {
+      "name": "decoder.layers.0.weight",
+      "shape": [
+        64,
+        12
+      ],
+      "offset": 528128,
+      "size": 768
+    },
+    {
+      "name": "decoder.layers.0.bias",
+      "shape": [
+        64
+      ],
+      "offset": 531200,
+      "size": 64
+    },
+    {
+      "name": "decoder.layers.2.weight",
+      "shape": [
+        64,
+        64
+      ],
+      "offset": 531456,
+      "size": 4096
+    },
+    {
+      "name": "decoder.layers.2.bias",
+      "shape": [
+        64
+      ],
+      "offset": 547840,
+      "size": 64
+    },
+    {
+      "name": "decoder.layers.4.weight",
+      "shape": [
+        64,
+        64
+      ],
+      "offset": 548096,
+      "size": 4096
+    },
+    {
+      "name": "decoder.layers.4.bias",
+      "shape": [
+        64
+      ],
+      "offset": 564480,
+      "size": 64
+    },
+    {
+      "name": "decoder.layers.6.weight",
+      "shape": [
+        4,
+        64
+      ],
+      "offset": 564736,
+      "size": 256
+    },
+    {
+      "name": "decoder.layers.6.bias",
+      "shape": [
+        4
+      ],
+      "offset": 565760,
+      "size": 4
+    }
+  ],
+  "dtype": "float32",
+  "endianness": "little"
+}

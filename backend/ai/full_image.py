@@ -133,7 +133,7 @@ def train_image_model(model, test_images, criterion, optimizer, device='cuda', e
         print(f"Epoch [{epoch + 1}/{epochs}], Loss: {epoch_loss:.6f}")
 
 
-def save_debug_images(shared_grayscale, reconstructed_rgb, target_rgb, epoch, output_dir="debug_outputs"):
+def save_debug_images(shared_grayscale, reconstructed_rgb, target_rgb, epoch, output_dir="final_data"):
     import os
     os.makedirs(output_dir, exist_ok=True)
 
