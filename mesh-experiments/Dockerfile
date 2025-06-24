@@ -62,3 +62,4 @@ ENV PYTHONPATH=$FBX_SDK_ROOT/lib/Python37_x64:$PYTHONPATH
 
 WORKDIR /app
 COPY . /app
+COPY static /app/static

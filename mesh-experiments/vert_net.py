@@ -33,15 +33,14 @@ from piq import SSIMLoss
 
 import lpips
 from soap import SOAP
-from asset_rep import MeshData
+from asset_rep import MeshData, TextureData
 from data_conversion import load_fbx_to_meshdata, export_meshdata_list
 import cProfile
 import pstats
 import io
 
 
-
-def generate_polyvert_grid(res=32, device="cuda"):
+def generate_vert_grid(res=32, device="cuda"):
     """
     Creates a grid of triangles (2 per square cell), each with its own independent vertices.
     Returns:
@@ -55,35 +54,24 @@ def generate_polyvert_grid(res=32, device="cuda"):
     )
     verts_grid = torch.stack([xs, ys], dim=-1)  # (res, res, 2)
 
-    polyverts = []
+    verts = []
+    triangles = []
     for i in range(res - 1):
         for j in range(res - 1):
             # Get corners of the cell
+            current_idx = len(verts)
             v00 = verts_grid[i, j]
             v01 = verts_grid[i, j + 1]
             v10 = verts_grid[i + 1, j]
             v11 = verts_grid[i + 1, j + 1]
+            verts.extend([v00, v10, v01, v11])
+            triangles.append([current_idx, current_idx + 1, current_idx + 2])  # Triangle 1
+            triangles.append([current_idx + 2, current_idx + 1, current_idx + 3])  # Triangle 2
 
-            # Triangle 1: v00, v10, v01
-            polyverts.extend([
-                v00.clone(),
-                v10.clone(),
-                v01.clone(),
-            ])
-            # Triangle 2: v01, v10, v11
-            polyverts.extend([
-                v01.clone(),
-                v10.clone(),
-                v11.clone()
-            ])
+    verts = torch.stack(verts, dim=0)  # (N * 3, 2)
+    triangles = torch.tensor(triangles, dtype=torch.long, device=device)  # (N, 3)
 
-    polyverts = torch.stack(polyverts, dim=0)  # (N * 3, 2)
-    print(f"Polyvert stats: {polyverts.shape[0]} verts, {polyverts.shape[1]} dims")
-    print(f"Polyvert range: {polyverts.min().item()} to {polyverts.max().item()}")
-    num_tris = polyverts.shape[0] // 3
-    triangles = torch.arange(num_tris * 3, device=device).reshape(num_tris, 3)
-
-    return polyverts, triangles
+    return verts, triangles
 
 
 def generate_delaunay(n_points=1024, device="cuda", seed=42):
@@ -149,11 +137,13 @@ class TextureNet(torch.nn.Module):
 
     def __init__(self, source_tex, res=64, latent_dim=16, hidden_dim=64):
         super().__init__()
+        self.source_tex = source_tex
         self.shape = source_tex.shape
         device = source_tex.device
 
         # polyverts, triangles = generate_polyvert_grid(res=res, device=device)
         verts, triangles, neighbors = generate_delaunay(n_points=res**2, device=device)
+        
         self.register_buffer("base_uvs", verts * 2 - 1)  # Scale to [-1, 1] range
         self.register_buffer("faces", triangles)
         self.register_buffer("neighbors", neighbors)  # (N_tris, k)
@@ -260,6 +250,8 @@ class TextureNet(torch.nn.Module):
         Exports the current mesh with updated UVs and colors to an OBJ file.
         """
         updated_uvs, colors = self.forward()
+        # Apply gamma correction (sRGB, gamma=2.2)
+        colors = colors.clamp(0, 1).pow(2.2)
         triangles = self.faces.cpu().numpy()
         output = {
             "vertices": updated_uvs.cpu().numpy().tolist(),
@@ -272,15 +264,29 @@ class TextureNet(torch.nn.Module):
 
 class TextureNet2(TextureNet):
 
-    def __init__(self, source_tex, res=64, latent_dim=128, latent_channels = 4, hidden_dim=64):
+    def __init__(self, source_tex, res=128, latent_dim=128, latent_channels = 4, hidden_dim=64):
         super().__init__(source_tex, res=res, latent_dim=latent_dim, hidden_dim=hidden_dim)
         self.shape = source_tex.shape
         device = source_tex.device
+        self.source_tex = source_tex
 
-        verts, triangles, _ = generate_delaunay(n_points=res**2, device=device)
+        # verts, triangles, _ = generate_delaunay(n_points=res**2, device=device)
+        verts, triangles = generate_vert_grid(res=res, device=device)
         self.register_buffer("base_uvs", verts * 2 - 1)  # Scale to [-1, 1] range
         self.register_buffer("faces", triangles)
-        self.latent = nn.Parameter(torch.randn(latent_channels, latent_dim, latent_dim))
+
+        self.encoder = nn.Sequential(
+            nn.Conv2d(3, hidden_dim, kernel_size=7, stride=2, padding=3),   # (1024x1024)
+            nn.ReLU(),
+            nn.Conv2d(hidden_dim, hidden_dim * 2, kernel_size=3, stride=2, padding=1),  # (512x512)
+            nn.ReLU(),
+            nn.Conv2d(hidden_dim * 2, hidden_dim * 4, kernel_size=3, stride=2, padding=1),  # (256x256)
+            nn.ReLU(),
+            nn.Conv2d(hidden_dim * 4, latent_channels, kernel_size=3, stride=2, padding=1),  # (128x128)
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((latent_dim, latent_dim)),  # force final shape (latent_dim, latent_dim)
+            nn.Tanh()
+        )
 
         self.decoder = nn.Sequential(
             nn.Conv2d(latent_channels, hidden_dim * 4, 3, padding=1),
@@ -331,7 +337,11 @@ class TextureNet2(TextureNet):
     def forward(self):
         grid = self.base_uvs.view(1, -1, 1, 2).flip(-1)  # (1, N, 1, 2), (u,v) → (x,y)
 
-        feat = self.decoder(self.latent.unsqueeze(0))  # (1, C, H, W)
+        # Permute source_tex to (1, 3, H, W)
+        source_tex = self.source_tex[..., :3].permute(2, 0, 1).unsqueeze(0)
+
+        latent = self.encoder(source_tex)  # (1, latent_channels, H, W)
+        feat = self.decoder(latent)  # (1, C, H, W)
         delta = F.grid_sample(self.delta_map(feat), grid, mode='bilinear', align_corners=True)
         delta = delta.squeeze(-1).squeeze(0).transpose(0, 1)
         print(f"Delta shape: {delta.shape}, UVs shape: {self.base_uvs.shape}")
@@ -344,6 +354,123 @@ class TextureNet2(TextureNet):
         print(f"Color shape: {color.shape}, UVs shape: {new_uvs.shape}")
         return new_uvs, color
 
+
+class ResidualBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, dilation=1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=dilation, dilation=dilation)
+        self.bn1 = nn.BatchNorm2d(out_ch)
+        self.relu = nn.ReLU()
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=dilation, dilation=dilation)
+        self.bn2 = nn.BatchNorm2d(out_ch)
+
+        self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+
+    def forward(self, x):
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+        out = self.conv2(out)
+        out = self.bn2(out)
+        return self.relu(out + self.skip(x))
+
+
+class TextureNet3(TextureNet):
+    def __init__(self, source_tex, n_points, latent_dim=128, hidden_dim=128, latent_channels=4):
+        super().__init__(source_tex)
+        device = source_tex.device
+        self.n_points = n_points
+        self.encoder = nn.Sequential(
+            nn.Conv2d(3, hidden_dim, kernel_size=7, stride=2, padding=3),   # (1024x1024)
+            nn.ReLU(),
+            nn.Conv2d(hidden_dim, hidden_dim * 2, kernel_size=3, stride=2, padding=1),  # (512x512)
+            nn.ReLU(),
+            nn.Conv2d(hidden_dim * 2, hidden_dim * 4, kernel_size=3, stride=2, padding=1),  # (256x256)
+            nn.ReLU(),
+            nn.Conv2d(hidden_dim * 4, latent_channels, kernel_size=3, stride=2, padding=1),  # (128x128)
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((latent_dim, latent_dim)),  # force final shape (latent_dim, latent_dim)
+            nn.Tanh()
+        )
+
+        self.decoder = nn.Sequential(
+            nn.Conv2d(latent_channels, hidden_dim * 4, 3, padding=1),
+            nn.LayerNorm([hidden_dim * 4,  latent_dim, latent_dim]),
+            nn.ReLU(),
+            nn.Conv2d(hidden_dim * 4, hidden_dim * 4, 3, padding=1),
+            nn.LayerNorm([hidden_dim * 4,  latent_dim, latent_dim]),
+            nn.ReLU(),
+            nn.Conv2d(hidden_dim * 4, hidden_dim * 2, 3, padding=1),
+            nn.LayerNorm([hidden_dim * 2,  latent_dim, latent_dim]),
+            nn.ReLU(),
+            nn.Conv2d(hidden_dim * 2, hidden_dim, 3, padding=1),
+            nn.LayerNorm([hidden_dim,  latent_dim, latent_dim]),
+            nn.ReLU()
+        )
+
+        # A deeper and wider point_head with more nonlinearities and context
+        self.point_backbone = nn.Sequential(
+            ResidualBlock(hidden_dim, hidden_dim * 2),
+            ResidualBlock(hidden_dim * 2, hidden_dim * 4, dilation=2),
+            ResidualBlock(hidden_dim * 4, hidden_dim * 2),
+            ResidualBlock(hidden_dim * 2, hidden_dim)
+        )
+
+        self.point_mlp = nn.Linear(hidden_dim, n_points * 2)
+
+        # Xavier initialization for all Conv2d layers in decoder and point_head
+        def xavier_init_sequential(seq):
+            for m in seq.modules():
+                if isinstance(m, torch.nn.Conv2d):
+                    torch.nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        torch.nn.init.zeros_(m.bias)
+
+        xavier_init_sequential(self.decoder)
+
+        self.color_head = nn.Sequential(
+            nn.Conv2d(hidden_dim, n_points * 3, 3, padding=1),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, freeze_points=False, freeze_colors=False):
+        if freeze_points:
+            for p in self.point_backbone.parameters():
+                p.requires_grad = False
+            for p in self.point_mlp.parameters():
+                p.requires_grad = False
+        else:
+            for p in self.point_backbone.parameters():
+                p.requires_grad = True
+            for p in self.point_mlp.parameters():
+                p.requires_grad = True
+        if freeze_colors:
+            for p in self.color_head.parameters():
+                p.requires_grad = False
+        else:
+            for p in self.color_head.parameters():
+                p.requires_grad = True
+        source_tex = self.source_tex[..., :3].permute(2, 0, 1).unsqueeze(0)
+
+        latent = self.encoder(source_tex)
+        feat = self.decoder(latent)
+
+        # Predict point positions
+        x = self.point_backbone(feat)                  # (1, hidden_dim, H, W)
+        point_feat = x.mean(dim=[2, 3])               # (1, C)
+        point_logits = self.point_mlp(point_feat)     # nn.Linear(C, n_points * 2)
+        uvs = point_logits.view(self.n_points, 2)
+
+        # Predict per-point colors
+        color_logits = self.color_head(feat)  # (1, 3 * n_points, H, W)
+        color_logits = F.adaptive_avg_pool2d(color_logits, (1, 1))
+        colors = color_logits.view(self.n_points, 3)
+
+        uvs_np = uvs.detach().cpu().numpy()
+        tri = Delaunay(uvs_np)
+        self.faces = torch.tensor(tri.simplices, dtype=torch.long, device=uvs.device)
+
+        return uvs, colors
 
 class DeltaScaler:
     def __init__(self, init_scale, max_scale, grow_speed):
@@ -379,6 +506,52 @@ class UnlitShader(torch.nn.Module):
 
         # Return the first sample (K=1 assumed)
         return pixel_colors[..., 0, :]
+        
+
+class SliceColorShader(torch.nn.Module):
+    def __init__(self, device="cuda"):
+        super().__init__()
+        self.device = device
+
+    def forward(self, fragments, meshes, **kwargs):
+        faces = meshes.faces_packed()  # (F, 3)
+        verts_colors = meshes.textures.verts_features_packed()  # (V, 3)
+        face_colors = verts_colors[faces]  # (F, 3, 3)
+
+        face_idx = fragments.pix_to_face[..., 0]  # (N, H, W)
+        bary = fragments.bary_coords[..., 0, :]   # (N, H, W, 3)
+
+        # Get index of max barycentric coordinate → closest vertex in triangle
+        max_idx = bary.argmax(dim=-1)  # (N, H, W)
+
+        # For valid pixels
+        mask = face_idx >= 0
+        output = torch.zeros_like(bary[..., :3])  # (N, H, W, 3)
+        output[mask] = face_colors[face_idx[mask], max_idx[mask]]
+
+        return output
+
+
+class FlatColorShader(torch.nn.Module):
+    def __init__(self, device="cuda"):
+        super().__init__()
+        self.device = device
+
+    def forward(self, fragments, meshes, **kwargs):
+        faces = meshes.faces_packed()  # (F, 3)
+        verts_colors = meshes.textures.verts_features_packed()  # (V, 3)
+        face_colors = verts_colors[faces]  # (F, 3, 3)
+        avg_face_colors = face_colors.mean(dim=1)  # (F, 3)
+
+        # Use only first face per pixel (K=1 assumed)
+        face_idx = fragments.pix_to_face[..., 0]  # (N, H, W)
+        mask = face_idx >= 0
+        pixel_colors = torch.zeros_like(face_idx, dtype=torch.float32).unsqueeze(-1).repeat(1, 1, 1, 3)
+
+        valid_idx = face_idx[mask]
+        pixel_colors[mask] = avg_face_colors[valid_idx]
+
+        return pixel_colors
 
 
 def make_uvspace_renderer(H, W, device="cuda"):
@@ -400,7 +573,6 @@ def make_uvspace_renderer(H, W, device="cuda"):
         shader=UnlitShader(device=device)
     )
     return renderer
-
 
 
 def meshdata_to_pytorch3d_mesh(mesh_data: MeshData):
@@ -594,6 +766,8 @@ def train_latent_texture(
     ssim_loss = SSIMLoss().to(device)
     for epoch in range(epochs):
         opt.zero_grad()
+        # freeze_points = epoch < epochs // 3
+        # freeze_colors = epoch < epochs // 6
         updated_uvs, colors = model.forward()
         output = model.render(updated_uvs, colors)
         geom_loss = triangle_aspect_loss(updated_uvs, model.faces) + uv_area_loss(updated_uvs, model.faces)
@@ -604,22 +778,26 @@ def train_latent_texture(
         image_loss = ssim_loss(output_img, source_img)
 
         # color_loss = lpips_loss(output_rgb, source_tex_rgb).mean()
-        loss = (geom_loss + image_loss) / 2
-        if torch.abs(last_loss - loss) < 1e-5:
-            model.increment_delta_scale(1e-4)
-            flat_epochs += 1
-            if flat_epochs > 10:
-                model.increment_delta_scale(1e-3)
-                flat_epochs = 0
-        else:
-            flat_epochs = 0
-        last_loss = loss
+        loss = geom_loss * 0.5 + image_loss * 0.5
+        # if torch.abs(last_loss - loss) < 1e-5:
+        #     model.increment_delta_scale(1e-4)
+        #     flat_epochs += 1
+        #     if flat_epochs > 10:
+        #         model.increment_delta_scale(1e-3)
+        #         flat_epochs = 0
+        # else:
+        #     flat_epochs = 0
+        # last_loss = loss
         loss.backward()
+        # torch.nn.utils.clip_grad_norm_(model.point_backbone.parameters(), max_norm=5.0)
+        # torch.nn.utils.clip_grad_norm_(model.encoder.parameters(), max_norm=5.0)
+        # torch.nn.utils.clip_grad_norm_(model.decoder.parameters(), max_norm=5.0)
+
         # Compute and print grad norms for each submodule
-        print(f"Latent grad norm: {model.latent.grad.norm().item():.6f}")
+        # print(f"Latent grad norm: {model.latent.grad.norm().item():.6f}")
         grad_norms = {}
         for name, module in [
-            # ("latent", model.latent),
+            ("encoder", model.encoder),
             ("decoder", model.decoder),
             ("delta_map", model.delta_map),
             ("color_map", model.color_map),
@@ -648,17 +826,32 @@ def train_latent_texture(
 
 if __name__ == "__main__":
     # Load the mesh from an FBX file
-    meshes = load_fbx_to_meshdata("static/meshes/Horse.fbx")
+    # meshes = load_fbx_to_meshdata("static/meshes/Horse.fbx")
 
-    for mesh in meshes:
-        model = train_latent_texture(
-            mesh.mapped_texture.image.float().detach(),
-            epochs=2500,
+    texture_files = [
+        "static/T_Horse_Saddle_M_D_Bk.tga",
+        "static/T_Horse_Body_M_D_WhS.tga",
+    ]
+
+    for tex_path in texture_files:
+        texture = TextureData.load(tex_path)
+        tex_name = os.path.splitext(os.path.basename(tex_path))[0]
+        train_latent_texture(
+            texture.image.float().detach(),
+            epochs=1500,
             save_every=25,
-            save_dir="scratch_space",
-            hidden_dim=128,
-
+            save_dir=f"scratch_space_{tex_name}",
         )
+
+    # for mesh in meshes:
+    #     model = train_latent_texture(
+    #         mesh.mapped_texture.image.float().detach(),
+    #         epochs=2500,
+    #         save_every=25,
+    #         save_dir="scratch_space",
+    #         hidden_dim=128,
+
+    #     )
 
         # map_learned_texture_to_mesh(
         #     mesh,

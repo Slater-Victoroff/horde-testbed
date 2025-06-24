@@ -357,15 +357,24 @@ class SOAP(optim.Optimizer):
             if len(m) == 0:
                 final.append([])
                 continue
-            try:
-                _, Q = torch.linalg.eigh(m+1e-30*torch.eye(m.shape[0], device=m.device))
-            except:
-                _, Q = torch.linalg.eigh(m.to(torch.float64)+1e-30*torch.eye(m.shape[0], device=m.device))
-                Q = Q.to(m.dtype)
-            Q = torch.flip(Q, [1])
 
-            if not float_data:
-                Q = Q.to(original_device).type(original_type)
+            # Ensure symmetric, finite matrix
+            m = (m + m.T) / 2
+            m = torch.nan_to_num(m, nan=0.0, posinf=1.0, neginf=-1.0)
+            m = m + 1e-5 * torch.eye(m.shape[0], device=m.device)
+
+            try:
+                _, Q = torch.linalg.eigh(m)
+            except:
+                try:
+                    m64 = m.to(torch.float64)
+                    _, Q = torch.linalg.eigh(m64)
+                    Q = Q.to(m.dtype)
+                except:
+                    print("WARNING: eigh failed even in float64, using identity fallback")
+                    Q = torch.eye(m.shape[0], device=m.device, dtype=m.dtype)
+
+            Q = torch.flip(Q, [1])  # Descending order
             final.append(Q)
         return final
         
