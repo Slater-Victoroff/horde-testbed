@@ -223,7 +223,7 @@ def save_images(model, control_tensor, n=5, base_dir=None, write_files=True):
             # save_latent_to_exr(latent_grid, latent_path)
             model_path = os.path.join(base_dir, "model_weights.pth")
             torch.save(model.state_dict(), model_path)
-            gif_path = os.path.join(base_dir, "control_animation.gif")
+            gif_path = os.path.join(base_dir, "control_animation.webp")
 
         reconstructed_batch, sampled_controls = generate_control_animation(model, control_tensor, gif_path=gif_path, write_files=write_files)
     return reconstructed_batch, sampled_controls
@@ -259,22 +259,31 @@ def generate_control_animation(model, control_tensor, num_frames=20, control_axi
             output_image = np.clip(output_image, 0, 1)
             # output_image = output_image ** (1 / 2.2)
             
-            # Check if the output has 4 channels and remove the fourth channel if present
+            # Preserve all channels including alpha
             if output_image.shape[-1] == 1:
                 frame = (output_image[..., 0] * 255).astype(np.uint8)
                 pil_mode = "L"
-            elif output_image.shape[-1] in [3, 4]:
-                frame = (output_image[..., :3] * 255).astype(np.uint8)
+            elif output_image.shape[-1] == 4:
+                frame = (output_image * 255).astype(np.uint8)  # Keep all 4 channels
+                pil_mode = "RGBA"
+            elif output_image.shape[-1] == 3:
+                frame = (output_image * 255).astype(np.uint8)
                 pil_mode = "RGB"
             frames.append(Image.fromarray(frame, mode=pil_mode))
 
     if write_files:
+        # Change extension to .webp
+        webp_path = gif_path.replace('.gif', '.webp')
+        
+        # Save as animated WebP with fast encoding
         frames[0].save(
-            gif_path,
+            webp_path,
             save_all=True,
             append_images=frames[1:],
             duration=40,
-            loop=0
+            loop=0,
+            lossless=True,  # Still lossless to avoid artifacts
+            method=0        # Fastest encoding method
         )
     return torch.stack(outputs), sampled_controls
 
@@ -297,9 +306,86 @@ def generate_control_grid_animation(model, control_tensor, gif_path, num_frames=
 
     # Generate GIFs for each value of the secondary axis
     for value in axis_2_values:
-        gif_path_with_value = gif_path.replace(".gif", f"_axis2_{value:.2f}.gif")
+        gif_path_with_value = gif_path.replace(".webp", f"_axis2_{value:.2f}.webp").replace(".gif", f"_axis2_{value:.2f}.webp")
         fixed_values = {axis_2: value}
         generate_control_animation(
             model, control_tensor, gif_path_with_value, num_frames=num_frames, control_axis=axis_1, fixed_values=fixed_values
         )
         print(f"Generated GIF for axis_2 value {value:.2f} at {gif_path_with_value}")
+
+
+def generate_comparison_gif(original_frames, control_frames, gif_path, duration=40):
+    """
+    Generate a 4-quadrant WebP animation showing:
+    - Top left: Original animation
+    - Top right: Control animation (reconstruction)
+    - Bottom left: Diff between original and control
+    - Bottom right: Renormalized diff (emphasizing areas with largest difference)
+    
+    :param original_frames: List or tensor of original animation frames
+    :param control_frames: List or tensor of control/reconstructed animation frames
+    :param gif_path: Path to save the generated animation (will be saved as WebP)
+    :param duration: Duration between frames in milliseconds
+    """
+    # Convert tensors to numpy arrays if needed
+    if torch.is_tensor(original_frames):
+        original_frames = [frame.cpu().numpy() for frame in original_frames]
+    if torch.is_tensor(control_frames):
+        control_frames = [frame.cpu().numpy() for frame in control_frames]
+    
+    if len(original_frames) != len(control_frames):
+        raise ValueError(f"Frame count mismatch: {len(original_frames)} original vs {len(control_frames)} control")
+    
+    composite_frames = []
+    
+    for orig_frame, ctrl_frame in zip(original_frames, control_frames):
+        # Ensure frames are in [0, 1] range
+        orig_frame = np.clip(orig_frame, 0, 1)
+        ctrl_frame = np.clip(ctrl_frame, 0, 1)
+        
+        # Calculate diff
+        diff = (np.abs(orig_frame - ctrl_frame) + 1) / 2
+        diff = np.clip(diff, 0, 1)
+        # Add one and divide by two to get a range of [0, 1]
+        directional_diff = np.clip((ctrl_frame - orig_frame + 1) / 2, 0, 1)
+        
+        # Get dimensions
+        h, w = orig_frame.shape[:2]
+        
+        # Create 2x2 grid
+        top_row = np.hstack([orig_frame, ctrl_frame])
+        bottom_row = np.hstack([diff, directional_diff])
+        composite = np.vstack([top_row, bottom_row])
+        
+        # Convert to uint8
+        composite_uint8 = (composite * 255).astype(np.uint8)
+        
+        # Determine PIL mode based on channels - preserve alpha if present
+        if len(composite_uint8.shape) == 2 or composite_uint8.shape[2] == 1:
+            if len(composite_uint8.shape) == 3:
+                composite_uint8 = composite_uint8[..., 0]
+            pil_mode = "L"
+        elif composite_uint8.shape[2] == 4:
+            pil_mode = "RGBA"  # Preserve alpha channel
+        else:
+            composite_uint8 = composite_uint8[..., :3]
+            pil_mode = "RGB"
+        
+        composite_frames.append(Image.fromarray(composite_uint8, mode=pil_mode))
+    
+    # Save as WebP animation
+    if composite_frames:
+        # Change extension to .webp
+        webp_path = gif_path.replace('.gif', '.webp')
+        
+        # Save as animated WebP with fast encoding
+        composite_frames[0].save(
+            webp_path,
+            save_all=True,
+            append_images=composite_frames[1:],
+            duration=duration,
+            loop=0,
+            lossless=True,  # Still lossless to avoid artifacts
+            method=0        # Fastest encoding method
+        )
+        print(f"Saved comparison WebP to {webp_path}")

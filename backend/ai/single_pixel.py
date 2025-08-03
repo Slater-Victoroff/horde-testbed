@@ -1,6 +1,7 @@
 import os
 import json
 from datetime import datetime
+import time
 
 import torch
 import torch.nn as nn
@@ -13,7 +14,7 @@ from piq import ssim, SSIMLoss
 from decoders import VFXSpiralNetDecoder, VFXNetPixelDecoder
 from losses import DCTLoss, GradientLoss
 from make_shader import decoder_to_glsl, compare_decoder_and_shader, save_weights_to_exr
-from image_utils import load_images, save_images
+from image_utils import load_images, save_images, generate_comparison_gif
 from soap import SOAP
 
 
@@ -54,7 +55,8 @@ class VFXNet(nn.Module):
         if self.decoder.latent_dim > 0:
             return self.decoder(raw_pos, control[:, 0:1], self.latent)
         else:
-            return self.decoder(raw_pos, control[:, 0:1])
+            out = self.decoder(raw_pos, control[:, 0:1])
+            return out
     
     def full_image(self, control):
         # Expand control to match the first dimension of self.raw_pos
@@ -175,7 +177,7 @@ def compute_gradient_scores(
     return grad_scores
 
 
-def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, experiment_name=None, decoder_config=None):
+def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8196, experiment_name=None, decoder_config=None):
     # Load images and create tensors
     image_tensor, raw_pos, control_tensor, shape = load_images(image_dir, device)
     print(f"image_tensor shape: {image_tensor.shape}")
@@ -196,7 +198,7 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
         model.parameters(),
         weight_decay=0,
     )
-    train_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    train_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4)
     print(f"Train_dataloader_stats: {len(train_dataloader)} batches, {len(train_dataloader.dataset)} samples")
 
     # scheduler = CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-5)
@@ -211,10 +213,18 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
         model.train()
         pixel_loss = 0.0
         batch_num = 0
+        start_time = time.time()
         for image, raw_pos, control in train_dataloader:
             batch_num += 1
             if batch_num % 100 == 0:
                 print(f"Batch {batch_num}/{len(train_dataloader)}")
+                print(f"Examples per second: {batch_num * batch_size / (time.time() - start_time):.2f}")
+            
+            # Move batch data to device
+            image = image.to(device)
+            raw_pos = raw_pos.to(device) 
+            control = control.to(device)
+            
             reconstructed_image = model.forward(raw_pos, control)
 
             mse_weight = 0.1
@@ -263,6 +273,28 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
             reconstructed_batch, sampled_controls = save_images(model, control_tensor, base_dir=epoch_dir)
             ssim_scores = compute_ssim_scores(reconstructed_batch, sampled_controls, image_tensor, (model.height, model.width), control_tensor, ssim_loss_fn=ssim_loss, update=False)
             avg_ssim = sum(ssim_scores) / len(ssim_scores)
+
+            # Generate comparison GIF
+            # First, collect original frames matching the sampled controls
+            H, W = shape[0], shape[1]
+            pixels_per_frame = H * W
+            T = control_tensor.shape[0] // pixels_per_frame
+            original_frames = []
+            
+            for control in sampled_controls:
+                t = control[0].item()
+                frame_idx = min(int(t * (T - 1)), T - 1)
+                start = frame_idx * pixels_per_frame
+                end = start + pixels_per_frame
+                gt_frame = image_tensor[start:end].view(H, W, -1).cpu().numpy()
+                original_frames.append(gt_frame)
+            
+            # Convert reconstructed batch to list format for comparison
+            control_frames = [frame.squeeze(0).cpu().numpy() for frame in reconstructed_batch]
+            
+            # Generate the comparison WebP
+            comparison_path = os.path.join(epoch_dir, "comparison.webp")
+            generate_comparison_gif(original_frames, control_frames, comparison_path)
 
             print(f"Average SSIM for epoch {epoch}: {avg_ssim:.4f}")
             metrics_path = f"png_tests/{model.experiment_name}/epoch_{epoch}/summary.json"
