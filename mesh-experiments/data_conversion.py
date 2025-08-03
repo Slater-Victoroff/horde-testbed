@@ -8,6 +8,8 @@ import numpy as np
 import fbx
 from fbx import FbxManager, FbxImporter, FbxScene, FbxMesh
 from PIL import Image
+from pytorch3d.renderer import TexturesVertex, TexturesUV
+from pytorch3d.structures import Meshes
 
 from asset_rep import MeshData
 
@@ -30,31 +32,9 @@ def load_fbx_to_meshdata(fbx_path: str, normalize: bool = True) -> List[MeshData
             print(f"Found mesh node: {node.GetName()}")
             name = node.GetName()
             mesh = node.GetMesh()
-            positions = _get_fbx_positions(mesh)
-            faces = _get_position_faces(mesh)
-            uvs, uv_faces = _get_fbx_uv_data(mesh) if mesh.GetElementUVCount() > 0 else (None, None)
-            normals, norm_faces = _get_fbx_normal_data(mesh) if  mesh.GetElementNormalCount() > 0 else (None, None)
-            colors, color_faces = _get_fbx_color_data(mesh) if mesh.GetElementVertexColorCount() > 0 else (None, None)
-
-            texture = _get_base_texture(mesh)
-            mesh_data = MeshData(
-                name=name,
-                positions=positions,
-                uvs = uvs,
-                normals=normals,
-                colors=colors,
-                polyvert_attrs= _build_polyvert_attrs(
-                    faces=faces,
-                    uv_faces=uv_faces,
-                    norm_faces=norm_faces,
-                    color_faces=color_faces
-                ),
-                triangles=_build_triangle_indices(faces),
-                base_texture_name=texture,
-                normalized=normalize
-            )
-            meshes.append(mesh_data)
+            meshes.append(_extract_data(node))
     base_textures = [mesh.base_texture_name for mesh in meshes if mesh.base_texture_name]
+
     mapped_textures = match_textures(
         source_names=base_textures,
         local_dir=os.path.dirname(fbx_path),
@@ -67,6 +47,28 @@ def load_fbx_to_meshdata(fbx_path: str, normalize: bool = True) -> List[MeshData
     print(f"Loaded {len(meshes)} meshes from {fbx_path}")
 
     return meshes
+
+
+def meshdata_to_pytorch3d_mesh(mesh_data: MeshData, texture_map:str = "uv") -> Meshes:
+    """
+    texture_map can be "neural", "uv", or "color"
+    """
+    verts = mesh_data.get_split_attribute("positions").float()
+    faces = mesh_data.triangles
+
+    if mesh_data.uvs is not None and getattr(mesh_data, "mapped_texture", None) is not None and mesh_data.mapped_texture.image is not None:
+        uvs = mesh_data.get_split_attribute("uvs")
+        uvs = uvs % 1.0
+        tex = mesh_data.mapped_texture.image[:, :, :3].float()
+        textures = TexturesUV(maps=[tex], faces_uvs=[faces], verts_uvs=[uvs])
+    elif mesh_data.colors is not None:
+        cols = mesh_data.get_split_attribute("colors").float()[:, :3]
+        textures = TexturesVertex(verts_features=[cols])  # (1, V, 3)
+    return Meshes(
+        verts=[verts],
+        faces=[faces],
+        textures=textures
+    )
 
 
 def _build_polyvert_attrs(faces, uv_faces, norm_faces, color_faces):
@@ -86,66 +88,90 @@ def _build_polyvert_attrs(faces, uv_faces, norm_faces, color_faces):
 
     return torch.tensor(polyverts, dtype=torch.long)
 
-def _build_triangle_indices(faces):
-    """
-    Faces are (F, 3). After flattening into polyverts, triangle indices become [0,1,2], [3,4,5], ...
-    """
-    num_faces = faces.shape[0]
-    return torch.arange(num_faces * 3, dtype=torch.long).reshape(-1, 3)
 
-
-def _get_fbx_positions(mesh: FbxMesh):
-    verts = []
-    for i in range(mesh.GetControlPointsCount()):
-        cp = mesh.GetControlPoints()[i]
-        verts.append([cp[0], cp[1], cp[2]])
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    return torch.tensor(verts, dtype=torch.float64, device=device)
-
-
-def _get_position_faces(mesh: FbxMesh):
+def _extract_data(node):
+    mesh = node.GetMesh()
+    name = node.GetName()
+    if not mesh:
+        raise ValueError(f"Node '{name}' does not contain a valid FbxMesh.")
     faces = []
+    positions = torch.empty((mesh.GetPolygonVertexCount(), 3), dtype=torch.float32)
+    polyverts = torch.full((mesh.GetPolygonVertexCount(), 4), -1, dtype=torch.long)  # (pos_idx, uv_idx, norm_idx, color_idx)
+    extract_uvs = False
+    extract_normals = False
+    extract_colors = False
+
+    if mesh.GetElementUVCount() > 0:
+        print("UVs found in mesh, extracting data...")
+        if mesh.GetElementUVCount() > 1:
+            raise ValueError("Multiple UV sets not supported in this function.")
+        uv_element = mesh.GetElementUV(0)
+        uv_set_name = uv_element.GetName()
+        print(f"Using UV set: {uv_set_name}")
+        extract_uvs = True
+        uvs = torch.empty((mesh.GetPolygonVertexCount(), 2), dtype=torch.float32)
+    if mesh.GetElementNormalCount() > 0:
+        print("Normals found in mesh, extracting data...")
+        if mesh.GetElementNormalCount() > 1:
+            raise ValueError("Multiple normal sets not supported in this function.")
+        extract_normals = True
+        norms = torch.empty((mesh.GetPolygonVertexCount(), 3), dtype=torch.float32)
+    if mesh.GetElementVertexColorCount() > 0:
+        print("Vertex colors found in mesh, extracting data...")
+        extract_colors = True
+        colors = torch.empty((mesh.GetPolygonVertexCount(), 3), dtype=torch.float32)
+    polyvert_id = 0
     for i in range(mesh.GetPolygonCount()):
-        face = []
-        for j in range(mesh.GetPolygonSize(i)):
-            idx = mesh.GetPolygonVertex(i, j)
-            face.append(idx)
-        faces.append(face)
+        polygon_size = mesh.GetPolygonSize(i)
+
+        for k in range(1, polygon_size - 1):  # triangulate for n-gons
+            faces.append([polyvert_id, polyvert_id + k, polyvert_id + k + 1])
+
+        for j in range(polygon_size):
+            ctrl_point_idx = mesh.GetPolygonVertex(i, j)
+            position = mesh.GetControlPointAt(ctrl_point_idx)
+            positions[polyvert_id] = torch.tensor([position[0], position[1], position[2]], dtype=torch.float32)
+
+            if extract_uvs:
+                uv_store = fbx.FbxVector2()
+                mesh.GetPolygonVertexUV(i, j, uv_set_name, uv_store)  # Assuming first UV set
+                uvs[polyvert_id] = torch.tensor([uv_store[0], uv_store[1]], dtype=torch.float32)
+            if extract_normals:
+                normal_store = fbx.FbxVector4()
+                mesh.GetPolygonVertexNormal(i, j, normal_store)  # Assuming first normal set
+                norms[polyvert_id] = torch.tensor([normal_store[0], normal_store[1], normal_store[2]], dtype=torch.float32)
+            # if extract_colors:
+                # print("Vertex colors extraction not implemented in this function.")
+            polyvert_id += 1
+    
+    print(f"Starting shapes - Faces: {len(faces)}, Positions: {positions.shape}, UVs: {uvs.shape if extract_uvs else 'N/A'}, Normals: {norms.shape if extract_normals else 'N/A'}")
+    # Deduplicate positions using torch.unique (along rows)
+    unique_positions, inverse_indices = torch.unique(positions, dim=0, return_inverse=True)
+    polyverts[:, 0] = inverse_indices
+    print(f"Unique positions: {unique_positions.shape[0]}")
+    if extract_uvs:
+        unique_uvs, uv_inverse_indices = torch.unique(uvs, dim=0, return_inverse=True)
+        print(f"Unique UVs: {unique_uvs.shape[0]}")
+        polyverts[:, 1] = uv_inverse_indices
+    if extract_normals:
+        unique_normals, norm_inverse_indices = torch.unique(norms, dim=0, return_inverse=True)
+        print(f"Unique normals: {unique_normals.shape[0]}")
+        polyverts[:, 2] = norm_inverse_indices
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    return torch.tensor(faces, dtype=torch.long, device=device)
+    faces = torch.tensor(faces, dtype=torch.long, device=device)
 
+    texture = _get_base_texture(mesh)
 
-def _get_fbx_uv_data(mesh: FbxMesh):
-    print("Extracting UVs from mesh...")
-    if mesh.GetElementUVCount() != 1:
-        raise ValueError(f"Expected 1 UV element, got {mesh.GetElementUVCount()}")
-
-    uv_element = mesh.GetElementUV(0)
-
-    if uv_element.GetMappingMode() != uv_element.EMappingMode.eByPolygonVertex:
-        raise ValueError(f"Unsupported UV mapping mode: {uv_element.GetMappingMode()}")
-
-    ref_mode = uv_element.GetReferenceMode()
-    poly_uvs = []
-
-    for i in range(mesh.GetPolygonVertexCount()):
-        if ref_mode == uv_element.EReferenceMode.eDirect:
-            uv = uv_element.GetDirectArray().GetAt(i)
-        elif ref_mode == uv_element.EReferenceMode.eIndexToDirect:
-            idx = uv_element.GetIndexArray().GetAt(i)
-            uv = uv_element.GetDirectArray().GetAt(idx)
-        else:
-            raise ValueError(f"Unsupported UV reference mode: {ref_mode}")
-        poly_uvs.append((uv[0], uv[1]))
-
-    # Deduplicate UVs and build remapping
-    unique_uvs, inverse_indices = np.unique(poly_uvs, axis=0, return_inverse=True)
-    uv_faces = inverse_indices.reshape((-1, 3))  # assuming triangulated input
-
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    return (
-        torch.tensor(unique_uvs, dtype=torch.float32, device=device),
-        torch.tensor(uv_faces, dtype=torch.long, device=device)
+    return MeshData(
+        name=name,
+        positions=unique_positions.to(device),
+        uvs=unique_uvs.to(device) if extract_uvs else None,
+        normals=unique_normals.to(device) if extract_normals else None,
+        colors=None,  # Vertex colors not implemented in this function
+        polyvert_attrs=polyverts.to(device),
+        triangles=faces,
+        base_texture_name=texture,
+        normalized=False  # Normalization flag
     )
 
 
@@ -218,17 +244,21 @@ def _get_fbx_color_data(mesh: FbxMesh):
 
 
 def _get_base_texture(mesh: FbxMesh):
+    print(f"Mesh layers: {mesh.GetLayerCount()}")
     node = mesh.GetNode()
     texture_path = None
     if node.GetMaterialCount() == 1:
         material = node.GetMaterial(0)
-        for slot in (fbx.FbxSurfaceMaterial.sDiffuse,
-                     "BaseColor", "DiffuseColor"):
+ 
+        for slot in ("Diffuse", "DiffuseColor", "BaseColor", "Albedo", "diffuse", "albedo", "Color"):
             prop = material.FindProperty(slot)
             if not prop.IsValid():
                 continue
-            if prop.GetSrcObjectCount() == 1:
+            if prop.GetSrcObjectCount() > 0 and prop.GetSrcObject(0).GetFileName():
                 texture_path = prop.GetSrcObject(0).GetFileName()
+            else:
+                texture_path = "Diffuse.png"  # Default fallback if no texture found
+            
     return texture_path
 
 
@@ -259,6 +289,8 @@ def match_textures(source_names: List[str], local_dir: List[str], min_ratio: flo
 
     source_extensions = {os.path.splitext(name)[1].lower() for name in source_names}
     local_names = _find_local_textures(local_dir, valid_types=source_extensions)
+    print(f"Found {len(local_names)} local textures in '{local_dir}' with extensions {source_extensions}")
+    print(f"Source textures: {source_names}")
 
     scores = []
     for m in source_names:
@@ -349,99 +381,6 @@ def write_meshdata_list_to_fbx(
     exporter.Destroy()
     manager.Destroy()
     print(f"Wrote updated FBX to '{new_fbx_path}' using {'ASCII' if export_ascii else 'default binary'} format.")
-
-def _replace_fbxmesh_with_meshdata(
-    fbx_mesh: fbx.FbxMesh,
-    mesh_data: "MeshData",
-    scene_root: fbx.FbxNode,
-    manager: fbx.FbxManager,
-):
-    """
-    Overwrite fbx_mesh's control points, UVs, normals, and polygon layout 
-    so that it matches mesh_data exactly. Any skinning/animation on fbx_mesh
-    remains attached, but internal geometry is replaced.
-    """
-    
-    # --- A) Replace control points (positions) ---
-    num_positions = mesh_data.positions.shape[0]
-    fbx_mesh.SetControlPointCount(num_positions)
-    for idx in range(num_positions):
-        x, y, z = mesh_data.positions[idx].tolist()
-        fbx_mesh.SetControlPointAt(fbx.FbxVector4(x, y, z), idx)
-
-    # --- B) Remove all existing polygons from the FBX mesh ---
-    while fbx_mesh.GetPolygonCount() > 0:
-        fbx_mesh.RemovePolygon(fbx_mesh.GetPolygonCount() - 1)
-    print(f"Replaced {num_positions} control points in mesh '{fbx_mesh.GetName()}'.")
-
-    # --- C) Prepare UV & Normal layers ---
-
-    # Ensure at least one layer exists
-    if fbx_mesh.GetLayerCount() == 0:
-        fbx_mesh.CreateLayer()
-    layer = fbx_mesh.GetLayer(0)
-    layer.SetSmoothing(None)
-
-    # UV layer (we use the “diffuse” channel as default)
-    uv_elem = layer.GetUVs()
-    if uv_elem:
-        print(f"Removing existing UV layer for mesh '{fbx_mesh.GetName()}'.")
-        layer.SetUVs(None)
-    print(f"Creating new UV layer for mesh '{fbx_mesh.GetName()}'.")
-    uv_elem = fbx.FbxLayerElementUV.Create(fbx_mesh, "")
-    uv_elem.SetMappingMode(fbx.FbxLayerElementUV.EMappingMode.eByPolygonVertex)
-    uv_elem.SetReferenceMode(fbx.FbxLayerElementUV.EReferenceMode.eIndexToDirect)
-    layer.SetUVs(uv_elem)
-
-    # Normal layer
-    norm_elem = layer.GetNormals()
-    if norm_elem:
-        print(f"Removing existing normals layer for mesh '{fbx_mesh.GetName()}'.")
-        layer.SetNormals(None)
-    print(f"Adding normals layer to mesh '{fbx_mesh.GetName()}'.")
-    norm_elem = fbx.FbxLayerElementNormal.Create(fbx_mesh, "")
-    norm_elem.SetMappingMode(fbx.FbxLayerElementNormal.EMappingMode.eByPolygonVertex)
-    norm_elem.SetReferenceMode(fbx.FbxLayerElementNormal.EReferenceMode.eIndexToDirect)
-    layer.SetNormals(norm_elem)
-
-    # Clear any existing direct/index arrays
-    uv_direct = uv_elem.GetDirectArray()
-    uv_index = uv_elem.GetIndexArray()
-    norm_direct = norm_elem.GetDirectArray()
-    norm_index = norm_elem.GetIndexArray()
-
-    uv_direct.Clear()
-    uv_direct.SetCount(mesh_data.uvs.shape[0])  # Set size to match mesh_data.uvs
-    uv_index.Clear()
-    uv_index.SetCount(mesh_data.triangles.shape[0] * 3)  # Set size to match triangles
-    norm_direct.Clear()
-    norm_direct.SetCount(mesh_data.normals.shape[0])  # Set size to match mesh_data.normals
-    norm_index.Clear()
-    norm_index.SetCount(mesh_data.triangles.shape[0] * 3)  # Set size to match triangles
-
-    triangles = mesh_data.triangles.cpu().tolist()         # list of [pv0, pv1, pv2]
-    poly_attrs = mesh_data.polyvert_attrs.cpu().tolist()   # each row = [pos, uv, norm, color?]
-
-    for tri in triangles:
-        fbx_mesh.BeginPolygon()
-        for pv_idx in tri:
-            pos_idx, uv_idx, norm_idx, *_ = poly_attrs[pv_idx]
-
-            # 1) Assign control point index
-            fbx_mesh.AddPolygon(pos_idx)
-
-            # 2) Append UV
-            u, v = mesh_data.uvs[uv_idx].tolist()
-            uv_direct.SetAt(uv_idx, fbx.FbxVector2(u, v))
-            uv_index.SetAt(pv_idx, uv_idx)
-
-            # 3) Append normal
-            nx, ny, nz = mesh_data.normals[norm_idx].tolist()
-            norm_direct.SetAt(norm_idx, fbx.FbxVector4(nx, ny, nz, 0.0))
-            norm_index.SetAt(pv_idx, norm_idx)
-
-        fbx_mesh.EndPolygon()
-    fbx_mesh.BuildMeshEdgeArray()
 
 
 def meshdata_to_glb(

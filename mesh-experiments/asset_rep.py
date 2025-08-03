@@ -215,7 +215,6 @@ class MeshData:
                 print("Warning: Colors are not provided. Setting the 3rd index of polyvert_attrs to -1.")
             if self.polyvert_attrs is not None:
                 self.polyvert_attrs[:, 3] = -1
-        # self.dedupe_attrs()
         self.validate()
         self.to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
     

@@ -1,8 +1,10 @@
 import os
+import time
 import json
 from datetime import datetime
 
 import torch
+import torch.profiler as profiler
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -55,19 +57,28 @@ class VFXNet(nn.Module):
             return self.decoder(raw_pos, control[:, 0:1], self.latent)
         else:
             return self.decoder(raw_pos, control[:, 0:1])
-    
-    def full_image(self, control):
+
+    def full_image(self, control, H=None, W=None):
         # Expand control to match the first dimension of self.raw_pos
+        if H is None or W is None:
+            print("WARNING: H and W are None, using model's height and width.")
+            H, W = self.height, self.width
+            raw_pos = self.raw_pos
+        else:
+            # Generate normalized raw_pos coordinates for H x W grid
+            x_coords = torch.arange(W, device=control.device).repeat(H, 1).view(-1, 1) / (W - 1)
+            y_coords = torch.arange(H, device=control.device).repeat(W, 1).t().contiguous().view(-1, 1) / (H - 1)
+            raw_pos = torch.cat([x_coords, y_coords], dim=1)
         t = control[:, 0:1]
-        expanded_time = t.unsqueeze(1).expand(-1, self.raw_pos.size(0), -1).reshape(-1, t.size(-1))
+        expanded_time = t.unsqueeze(1).expand(-1, raw_pos.size(0), -1).reshape(-1, t.size(-1))
         if self.decoder.latent_dim > 0:
             print("Again, the world has ended.")
             latent = self.latents(control[:, 1].long())
-            latent = latent.view(-1, self.height, self.width, LATENT_IMAGE_CHANNELS)
-            response = self.decoder(self.raw_pos, expanded_time, latent)
+            latent = latent.view(-1, H, W, LATENT_IMAGE_CHANNELS)
+            response = self.decoder(raw_pos, expanded_time, latent)
         else:
-            response = self.decoder(self.raw_pos, expanded_time)
-        shaped_image = response.view(self.height, self.width, self.output_channels)
+            response = self.decoder(raw_pos, expanded_time)
+        shaped_image = response.view(H, W, self.output_channels)
         return shaped_image
 
 
@@ -175,107 +186,108 @@ def compute_gradient_scores(
     return grad_scores
 
 
+def subsample_random_pixels(num_samples, image_tensor, raw_pos, control_tensor):
+    total_pixels = image_tensor.shape[0]
+    indices = torch.randperm(total_pixels)[:num_samples]
+    return (
+        image_tensor[indices],
+        raw_pos[indices],
+        control_tensor[indices],
+    )
+
+
+class PatchSampler(torch.utils.data.IterableDataset):
+    def __init__(self, image_tensor, tile_size=32):
+        self.image_tensor = image_tensor
+        self.tile_size = tile_size
+        self.margin_size = self.tile_size // 2
+        self.T, self.H, self.W, self.C = self.image_tensor.shape
+        xs = torch.arange(self.W) / (self.W - 1)
+        ys = torch.arange(self.H) / (self.H - 1)
+        self.ts = torch.arange(self.T) / (self.T - 1)
+        self.raw_pos = torch.stack(torch.meshgrid(ys, xs, indexing='ij'), dim=-1)
+
+    def __iter__(self):
+        t = torch.randint(0, self.T, (1,)).item()
+        x = torch.randint(self.margin_size, self.W - self.margin_size, (1,)).item()
+        y = torch.randint(self.margin_size, self.H - self.margin_size, (1,)).item()
+        image_patch = self.image_tensor[t, (y - self.margin_size):(y + self.margin_size), (x - self.margin_size):(x + self.margin_size), :]
+        raw_pos_patch = self.raw_pos[(y - self.margin_size):(y + self.margin_size), (x - self.margin_size):(x + self.margin_size), :]
+        t_patch = self.ts[t].repeat(self.tile_size, self.tile_size, 1)
+        yield (image_patch, raw_pos_patch, t_patch)
+
+
 def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, experiment_name=None, decoder_config=None):
-    # Load images and create tensors
-    image_tensor, raw_pos, control_tensor, shape = load_images(image_dir, device)
-    print(f"image_tensor shape: {image_tensor.shape}")
+    image_tensor = load_images(image_dir, device=device)
+    shape = image_tensor.shape[1:]
+    dataset = PatchSampler(image_tensor)
+
     mse_loss = nn.MSELoss().to(device)
     dct_loss = DCTLoss().to(device)
     gradient_loss = GradientLoss().to(device)
     ssim_loss = SSIMLoss(data_range=1.0).to(device)
 
-    # Create a dataset and dataloader
-    dataset = TensorDataset(image_tensor, raw_pos, control_tensor)
-
-    num_sequences = int(control_tensor[:, 1].max().item()) + 1
-    print(f"num_sequences: {num_sequences}")
     model = VFXNet(shape[0], shape[1], decoder_config=decoder_config).to(device)
     model.experiment_name = experiment_name or datetime.now().strftime("%Y%m%d_%H%M%S")
-    # optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     optimizer = SOAP(
         model.parameters(),
         weight_decay=0,
     )
-    train_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    print(f"Train_dataloader_stats: {len(train_dataloader)} batches, {len(train_dataloader.dataset)} samples")
 
-    # scheduler = CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-5)
-
-    base_path = f"png_tests/{model.experiment_name}"
+    base_path = f"anim_tests/{model.experiment_name}"
     os.makedirs(os.path.dirname(base_path), exist_ok=True)
 
     log_epochs = list(range(0, 11, 1)) + list(range(10, 51, 5)) + list(range(50, 101, 10)) + list(range(100, 501, 50)) + list(range(500, 1001, 100))
 
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+    )
+
+    total_pixel_loss = 0.0
     for epoch in range(epochs):
-        print(f"Epoch {epoch}/{epochs}")
         model.train()
-        pixel_loss = 0.0
-        batch_num = 0
-        for image, raw_pos, control in train_dataloader:
-            batch_num += 1
+
+        print(f"Epoch {epoch+1}/{epochs} - Pixel loss: {total_pixel_loss:.4f}")
+        total_pixel_loss = 0.0
+        for batch_num, (image, raw_pos_batch, control_batch) in enumerate(dataloader):
+            print(f"Batch {batch_num+1} - Image shape: {image.shape}, Raw pos shape: {raw_pos_batch.shape}, Control shape: {control_batch.shape}")
+            reconstructed_image = model(raw_pos_batch, control_batch)
             if batch_num % 100 == 0:
-                print(f"Batch {batch_num}/{len(train_dataloader)}")
-            reconstructed_image = model.forward(raw_pos, control)
-
-            mse_weight = 0.1
-            dct_weight = 0.15
-            l1_weight = 0.75
-
+                print(f"Batch {batch_num+1}/{num_batches}")
             pixel_loss = (
-                mse_weight * mse_loss(reconstructed_image, image) +
-                dct_weight * dct_loss(reconstructed_image, image) +
-                l1_weight * F.l1_loss(reconstructed_image, image)
+                0.1 * mse_loss(reconstructed_image, image) +
+                0.15 * dct_loss(reconstructed_image, image) +
+                0.75 * F.l1_loss(reconstructed_image, image)
             )
-
             optimizer.zero_grad()
             pixel_loss.backward()
             optimizer.step()
+            total_pixel_loss += pixel_loss.item()
         
-        reconstructed, sampled = save_images(model, control_tensor, write_files=False)
-        if epoch > 100:
-            compute_ssim_scores(
-                reconstructed, sampled, image_tensor, (model.height, model.width), control_tensor,
-                update=True, ssim_loss_fn=ssim_loss, optimizer=optimizer
-            )
-        # print(f"Frame loss: {frame_loss.item()}")
-        # print(f"Pixel loss: {pixel_loss.item()}")
-        # total_loss = (pixel_loss + frame_loss) / 2.0
-        # optimizer.zero_grad()
-        # total_loss.backward()
-        # optimizer.step()
-
-        # compute_gradient_scores(
-        #     reconstructed, sampled,
-        #     image_tensor, (model.height, model.width),
-        #     control_tensor,
-        #     update=True,
-        #     grad_loss_fn=gradient_loss,  # your Sobel‐based function
-        #     optimizer=optimizer
-        # )
-        # scheduler.step()
-
-        # print(f"Epoch [{epoch}/{epochs}], Loss: {epoch_loss:.6f}")
-        # Log specific epochs for detailed analysis
         if epoch in log_epochs:
             epoch_dir = f"{base_path}/epoch_{epoch}"
             os.makedirs(epoch_dir, exist_ok=True)
             model.eval()  # Set model to evaluation mode
-            reconstructed_batch, sampled_controls = save_images(model, control_tensor, base_dir=epoch_dir)
-            ssim_scores = compute_ssim_scores(reconstructed_batch, sampled_controls, image_tensor, (model.height, model.width), control_tensor, ssim_loss_fn=ssim_loss, update=False)
-            avg_ssim = sum(ssim_scores) / len(ssim_scores)
+            with torch.no_grad():
+                reconstructed_batch, sampled_controls = save_images(model, control_tensor, H=512, W=1024, base_dir=epoch_dir)
 
-            print(f"Average SSIM for epoch {epoch}: {avg_ssim:.4f}")
-            metrics_path = f"png_tests/{model.experiment_name}/epoch_{epoch}/summary.json"
-            os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
-            with open(metrics_path, "w") as f:
-                json.dump({
-                    "epoch": epoch,
-                    # "loss": pixel_loss.item(),
-                    "avg_ssim": avg_ssim,
-                    "ssim_per_frame": ssim_scores,
-                    "decoder_config": decoder_config
-                }, f, indent=2)
+                print(f"batch device: {reconstructed_batch.device}, control_tensor device: {control_tensor.device}")
 
+                ssim_scores = compute_ssim_scores(reconstructed_batch, sampled_controls, image_tensor, (model.height, model.width), control_tensor, ssim_loss_fn=ssim_loss, update=False)
+                avg_ssim = sum(ssim_scores) / len(ssim_scores)
+
+                # print(f"Average SSIM for epoch {epoch}: {avg_ssim:.4f}")
+                metrics_path = f"png_tests/{model.experiment_name}/epoch_{epoch}/summary.json"
+                os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
+                with open(metrics_path, "w") as f:
+                    json.dump({
+                        "epoch": epoch,
+                        # "loss": pixel_loss.item(),
+                        "avg_ssim": avg_ssim,
+                        "ssim_per_frame": ssim_scores,
+                        "decoder_config": decoder_config
+                    }, f, indent=2)
 
 
 def get_total_grad_norm(model, norm_type=2):

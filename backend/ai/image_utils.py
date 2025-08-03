@@ -64,45 +64,6 @@ def load_exr_image(image_path):
 def load_images(image_dir, device, input_image_channels=4, control_channels=2, norm=True, add_next=False):
     if "moving_mnist" in image_dir.name:
         input_image_channels = 1
-    # Control tensor assumed to be [time (0/1 normalized), latent(int)]
-    image_tensors, pos_tensors, control_tensors = [], [], []
-    if add_next:
-        image_tensors_next = []
-    shape = None
-
-    def _process_frame(frame, frame_idx=None, sequence_idx=0, prior_frame=None):
-        nonlocal shape
-        # Ensure correct channels
-        h, w, c = frame.shape
-        if c < input_image_channels:
-            pad = np.ones((h, w, input_image_channels - c), dtype=frame.dtype)
-            frame = np.concatenate([frame, pad], axis=-1)
-        if shape is None:
-            shape = frame.shape
-        elif shape != frame.shape:
-            raise ValueError(f"Frame shape mismatch: {shape} vs {frame.shape}")
-        # flatten image
-        img = torch.tensor(frame, dtype=torch.float32, device=device).view(-1, input_image_channels)
-        if add_next and prior_frame is not None:
-            image_tensors_next.append(img)
-            prior_frame = torch.tensor(prior_frame, dtype=torch.float32, device=device).view(-1, input_image_channels)
-            image_tensors.append(prior_frame)
-        else:
-            image_tensors.append(img)
-
-        # control vector
-        ctrl = torch.tensor([frame_idx] + [sequence_idx]*(control_channels-1), device=device)
-        control_tensors.append(ctrl.repeat(img.size(0),1))
-        # positional coords
-        if norm:
-            xs = torch.arange(w, device=device).repeat(h,1).view(-1,1) / w
-            ys = torch.arange(h, device=device).repeat(w,1).t().reshape(-1,1) / h
-        else:
-            xs = torch.arange(w, device=device).repeat(h,1).view(-1,1)
-            ys = torch.arange(h, device=device).repeat(w,1).t().reshape(-1,1)
-        pos = torch.cat([xs, ys], dim=1)
-        pos_tensors.append(pos)
-        return img
 
     if "moving_mnist" in image_dir.name:
         dataset = MovingMNIST(root="ref_data", split=None, download=True)
@@ -131,9 +92,16 @@ def load_images(image_dir, device, input_image_channels=4, control_channels=2, n
                 raise ValueError("Multiple GIF files found (excluding debug.gif). Please provide only one GIF file.")
             gif_path = gif_files[0]
             gif_frames = iio.imread(gif_path, plugin="pillow")  # Load all frames from the GIF
-            normalized_frames = [gif_frame / 255.0 for gif_frame in gif_frames]
-            for frame_idx, frame in enumerate(normalized_frames):
-                _process_frame(frame, frame_idx)
+            # Check overall size of the GIF frames
+            num_bytes = gif_frames.nbytes
+            if num_bytes > 4 * 1024 * 1024 * 1024:  # 4 GB limit
+                raise ValueError(f"GIF file is too large to load into GPU: {num_bytes} bytes")
+            else:
+                with torch.no_grad():
+                    gif_frames = torch.tensor(gif_frames, dtype=torch.float32, device=device)
+                    normalized_frames = gif_frames / 255.0
+
+
         elif png_files:
             if add_next:
                 prior_frame = None
@@ -165,40 +133,9 @@ def load_images(image_dir, device, input_image_channels=4, control_channels=2, n
                 else:
                     _process_frame(image, time)
 
-    # Combine all tensors
-    image_tensor = torch.cat(image_tensors, dim=0)  # [H*W*images, INPUT_IMAGE_CHANNELS]
-    image_tensor = image_tensor / image_tensor.max()  # Normalize to [0, 1]
-    if add_next:
-        image_tensor_next = torch.cat(image_tensors_next, dim=0)
-        image_tensor_next = image_tensor_next / image_tensor_next.max()
-    raw_pos = torch.cat(pos_tensors, dim=0)  # [H*W*images, 2]
-    control = torch.cat(control_tensors, dim=0)  # [H*W*images, CONTROL_CHANNELS]
+    return normalized_frames
 
-    # control[:, 0] is the time axis, control[:, 1] is the sequence ID
-    seq_ids   = control[:,1].long()            # keep these intact
-    time_vals = control[:,0:1]                 # just the time axis
-
-    # normalize *only* the continuous dims:
-    if norm:
-        t_min, _ = time_vals.min(0, keepdim=True)
-        t_max, _ = time_vals.max(0, keepdim=True)
-        t_norm   = (time_vals - t_min) / (t_max - t_min + 1e-8)
-
-        # rebuild:
-        control = torch.cat([t_norm, seq_ids.unsqueeze(1)], dim=1)
-
-    image_tensor = image_tensor.to(device)
-    if add_next:
-        image_tensor_next = image_tensor_next.to(device)
-    control = control.to(device)
-    raw_pos = raw_pos.to(device)
-    if add_next:
-        return image_tensor, image_tensor_next, raw_pos, control, shape
-    else:
-        return image_tensor, raw_pos, control, shape
-
-
-def save_images(model, control_tensor, n=5, base_dir=None, write_files=True):
+def save_images(model, control_tensor, H=256, W=256, n=5, base_dir=None, write_files=True):
     with torch.no_grad():
         # Randomly select n unique control vectors
         indices = torch.randperm(control_tensor.size(0))[:n]
@@ -206,7 +143,7 @@ def save_images(model, control_tensor, n=5, base_dir=None, write_files=True):
 
         # Generate reconstructed RGB images for each selected control vector
         for i, control in enumerate(selected_controls):
-            reconstructed_rgb = model.full_image(control.unsqueeze(0))  # Pass control vector to model
+            reconstructed_rgb = model.full_image(control.unsqueeze(0), H=H, W=W)  # Pass control vector to model
             rgb_image = reconstructed_rgb.squeeze(0).permute(2, 0, 1)  # [C, H, W]
 
             if write_files:
@@ -225,11 +162,11 @@ def save_images(model, control_tensor, n=5, base_dir=None, write_files=True):
             torch.save(model.state_dict(), model_path)
             gif_path = os.path.join(base_dir, "control_animation.gif")
 
-        reconstructed_batch, sampled_controls = generate_control_animation(model, control_tensor, gif_path=gif_path, write_files=write_files)
+        reconstructed_batch, sampled_controls = generate_control_animation(model, control_tensor, H=H, W=W, gif_path=gif_path, write_files=write_files)
     return reconstructed_batch, sampled_controls
 
 
-def generate_control_animation(model, control_tensor, num_frames=20, control_axis=None, fixed_values=None, write_files=True, gif_path=None):
+def generate_control_animation(model, control_tensor, H=256, W=256, num_frames=20, control_axis=None, fixed_values=None, write_files=True, gif_path=None):
     if control_axis is None:
         control_axis = 0  # Default to time axis
 
@@ -251,7 +188,7 @@ def generate_control_animation(model, control_tensor, num_frames=20, control_axi
     outputs = []
     with torch.no_grad():
         for control in sampled_controls:
-            reconstructed = model.full_image(control.unsqueeze(0))  # Pass control vector to model
+            reconstructed = model.full_image(control.unsqueeze(0), H=H, W=W)  # Pass control vector to model
             outputs.append(reconstructed)
             output_image = reconstructed.squeeze(0).cpu().numpy()  # [H, W, C]
 

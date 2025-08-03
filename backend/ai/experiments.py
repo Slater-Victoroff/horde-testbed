@@ -59,68 +59,152 @@ EXPERIMENTS = []
 #     },
 # ]
 
-EXPERIMENTS += [
-    {
-        "name": "ossim-small-L1-campfire",
-        "dataset": "VFX/stylized_flame/campfire01",
-        "config": {
-            "latent_dim": 0,
-            "trunk_pos_channels": 2,
-            "trunk_time_channels": 1,
-            "film_pos_channels": 16,
-            "film_time_channels": 8,
-            "film_pos_scheme": "spiral",
-            "film_time_scheme": "spiral",
-            "film_pos_include_raw": False,
-            "film_time_include_raw": False,
-            "prefilm_dims": 32,
-            "hidden_dim": 32,
-            "apply_film": [1]
-        }
-    },
-]
+# EXPERIMENTS += [
+#     {
+#         "name": "AnimationTest",
+#         "dataset": "VFX/DemoAnim",
+#         "config": {
+#             "latent_dim": 0,
+#             "trunk_pos_channels": 2,
+#             "trunk_time_channels": 1,
+#             "film_pos_channels": 32,
+#             "film_time_channels": 8,
+#             "film_pos_scheme": "sinusoidal",
+#             "film_time_scheme": "sinusoidal",
+#             "film_pos_include_raw": True,
+#             "film_time_include_raw": True,
+#             "prefilm_dims": 32,
+#             "hidden_dim": 32,
+#             "apply_film": [1],
+#         }
+#     }
+# ]
+
+# EXPERIMENTS += [
+#     {
+#         "name": "AnimationTestBigger",
+#         "dataset": "VFX/DemoAnim",
+#         "config": {
+#             "latent_dim": 0,
+#             "trunk_pos_channels": 2,
+#             "trunk_time_channels": 1,
+#             "film_pos_channels": 64,
+#             "film_time_channels": 8,
+#             "film_pos_scheme": "sinusoidal",
+#             "film_time_scheme": "sinusoidal",
+#             "film_pos_include_raw": True,
+#             "film_time_include_raw": True,
+#             "prefilm_dims": 32,
+#             "hidden_dim": 64,
+#             "apply_film": [1],
+#         }
+#     }
+# ]
+
+# EXPERIMENTS += [
+#     {
+#         "name": "AnimationTestBiggest",
+#         "dataset": "VFX/DemoAnim",
+#         "config": {
+#             "latent_dim": 0,
+#             "trunk_pos_channels": 8,
+#             "trunk_time_channels": 2,
+#             "film_pos_channels": 128,
+#             "film_time_channels": 8,
+#             "film_pos_scheme": "sinusoidal",
+#             "film_time_scheme": "sinusoidal",
+#             "film_pos_include_raw": True,
+#             "film_time_include_raw": True,
+#             "prefilm_dims": 32,
+#             "hidden_dim": 64,
+#             "apply_film": [1],
+#         }
+#     }
+# ]
 
 EXPERIMENTS += [
     {
-        "name": "ossim-small-L1-fireball",
-        "dataset": "VFX/stylized_flame/fireball01",
+        "name": "FireTest",
+        "dataset": "VFX/fire/",
         "config": {
             "latent_dim": 0,
             "trunk_pos_channels": 2,
             "trunk_time_channels": 1,
-            "film_pos_channels": 16,
+            "film_pos_channels": 64,
             "film_time_channels": 8,
-            "film_pos_scheme": "spiral",
-            "film_time_scheme": "spiral",
-            "film_pos_include_raw": False,
-            "film_time_include_raw": False,
+            "film_pos_scheme": "sinusoidal",
+            "film_time_scheme": "sinusoidal",
+            "film_pos_include_raw": True,
+            "film_time_include_raw": True,
             "prefilm_dims": 32,
-            "hidden_dim": 32,
-            "apply_film": [1]
+            "hidden_dim": 64,
+            "apply_film": [1],
         }
-    },
+    }
 ]
 
-EXPERIMENTS += [
-    {
-        "name": "ossim-small-L1-flame",
-        "dataset": "VFX/stylized_flame/flame01",
-        "config": {
-            "latent_dim": 0,
-            "trunk_pos_channels": 2,
-            "trunk_time_channels": 1,
-            "film_pos_channels": 16,
-            "film_time_channels": 8,
-            "film_pos_scheme": "spiral",
-            "film_time_scheme": "spiral",
-            "film_pos_include_raw": False,
-            "film_time_include_raw": False,
-            "prefilm_dims": 32,
-            "hidden_dim": 32,
-            "apply_film": [1]
-        }
-    },
-]
+# EXPERIMENTS += [
+#     {
+#         "name": "ossim-small-L1-campfire",
+#         "dataset": "VFX/stylized_flame/campfire01",
+#         "config": {
+#             "latent_dim": 0,
+#             "trunk_pos_channels": 2,
+#             "trunk_time_channels": 1,
+#             "film_pos_channels": 16,
+#             "film_time_channels": 8,
+#             "film_pos_scheme": "spiral",
+#             "film_time_scheme": "spiral",
+#             "film_pos_include_raw": False,
+#             "film_time_include_raw": False,
+#             "prefilm_dims": 32,
+#             "hidden_dim": 32,
+#             "apply_film": [1]
+#         }
+#     },
+# ]
+
+# EXPERIMENTS += [
+#     {
+#         "name": "ossim-small-L1-fireball",
+#         "dataset": "VFX/stylized_flame/fireball01",
+#         "config": {
+#             "latent_dim": 0,
+#             "trunk_pos_channels": 2,
+#             "trunk_time_channels": 1,
+#             "film_pos_channels": 16,
+#             "film_time_channels": 8,
+#             "film_pos_scheme": "spiral",
+#             "film_time_scheme": "spiral",
+#             "film_pos_include_raw": False,
+#             "film_time_include_raw": False,
+#             "prefilm_dims": 32,
+#             "hidden_dim": 32,
+#             "apply_film": [1]
+#         }
+#     },
+# ]
+
+# EXPERIMENTS += [
+#     {
+#         "name": "ossim-small-L1-flame",
+#         "dataset": "VFX/stylized_flame/flame01",
+#         "config": {
+#             "latent_dim": 0,
+#             "trunk_pos_channels": 2,
+#             "trunk_time_channels": 1,
+#             "film_pos_channels": 16,
+#             "film_time_channels": 8,
+#             "film_pos_scheme": "spiral",
+#             "film_time_scheme": "spiral",
+#             "film_pos_include_raw": False,
+#             "film_time_include_raw": False,
+#             "prefilm_dims": 32,
+#             "hidden_dim": 32,
+#             "apply_film": [1]
+#         }
+#     },
+# ]
 
 #     {
 #         "name": "spiral+raw-trunk-cloud",

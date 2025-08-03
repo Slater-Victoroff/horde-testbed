@@ -575,25 +575,6 @@ def make_uvspace_renderer(H, W, device="cuda"):
     return renderer
 
 
-def meshdata_to_pytorch3d_mesh(mesh_data: MeshData):
-    verts = mesh_data.get_split_attribute("positions").float()
-    faces = mesh_data.triangles
-    if mesh_data.uvs is not None:
-        uvs = mesh_data.get_split_attribute("uvs")
-        uvs = uvs % 1.0
-        tex = mesh_data.mapped_texture.image[:, :, :3].float()
-        textures = TexturesUV(maps=[tex], faces_uvs=[faces], verts_uvs=[uvs])
-    else:
-        # print(f"No UVs found in mesh data: {mesh_data.name}, using vertex colors.")
-        cols = mesh_data.get_split_attribute("colors").float()[:, :3]
-        textures = TexturesVertex(verts_features=[cols])  # (1, V, 3)
-    return Meshes(
-            verts=[verts],
-            faces=[faces],
-            textures=textures
-        )
-
-
 def snap_uvs_to_base(uvs, base_uvs, n_digits):
     factor = 10 ** n_digits
     uvs_q = torch.round(uvs * factor) / factor

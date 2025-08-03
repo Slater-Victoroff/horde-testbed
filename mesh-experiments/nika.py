@@ -16,6 +16,7 @@ from pytorch3d.renderer import (
 )
 
 from torchvision.transforms.functional import to_pil_image
+from pytorch3d.transforms import matrix_to_quaternion
 from pytorch3d.renderer import look_at_view_transform, TexturesVertex
 from pytorch3d.structures import Meshes
 from torchvision.utils import save_image, make_grid
@@ -34,14 +35,11 @@ class NikaNet(torch.nn.Module):
     """
     Neural Interpolated Kernel Array (NIKA).
     """
-    def __init__(self, latent_dim, output_dim=4, hidden_dim=64, pos_dims=16):
+    def __init__(self, latent_dim, output_dim=4, hidden_dim=64, pos_dims=64):
         super().__init__()
         # Define the layers and parameters of the NIKA network here
 
-        self.latent_trunk = torch.nn.Sequential(
-            torch.nn.Linear(latent_dim, hidden_dim),
-            torch.nn.GELU(),
-        )
+        self.trunk_1 = torch.nn.Linear(latent_dim, hidden_dim)
 
         self.pos_film = torch.nn.Sequential(
             torch.nn.Linear(pos_dims, hidden_dim),
@@ -49,18 +47,27 @@ class NikaNet(torch.nn.Module):
             torch.nn.Linear(hidden_dim, hidden_dim * 2),
         )
 
+        self.trunk_2 = torch.nn.Linear(hidden_dim + latent_dim, hidden_dim)
+
+        self.cam_film = torch.nn.Linear(3 + 4 + 1, hidden_dim * 2)  # 3 for position, 4 for quaternion, 1 for fov
+
         self.to_color = torch.nn.Sequential(
-            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.Linear(hidden_dim + latent_dim, hidden_dim),
             torch.nn.GELU(),
-            torch.nn.Linear(hidden_dim, output_dim),  # Output layer
+            torch.nn.Linear(hidden_dim, output_dim),
             torch.nn.Sigmoid()  # Ensure output is in [0, 1] range
         )
 
-    def get_frag_shader(self, cameras, lights):
+    def get_frag_shader(self, cameras, lights, img_size):
         return NeuralFragmentShader(
-            self.latent_trunk,
+            self.trunk_1,
             self.pos_film,
-            self.to_color
+            self.trunk_2,
+            self.cam_film,
+            self.to_color,
+            cameras = cameras,
+            lights = lights,
+            img_size = img_size
         ).to(cameras.device)
 
 
@@ -68,13 +75,20 @@ class NeuralFragmentShader(torch.nn.Module):
     """
     Shader that uses a neural network (MLP) to compute per-pixel color.
     """
-    def __init__(self, latent_trunk, pos_film, to_color):
+    def __init__(self, trunk_1, pos_film, trunk_2, cam_film, to_color, cameras, lights, img_size):
         super().__init__()
-        self.latent_dim = latent_trunk[0].in_features
+        self.latent_dim = trunk_1.in_features
+        self.trunk_1 = trunk_1
         self.pos_dims = pos_film[0].in_features
-        self.latent_trunk = latent_trunk
         self.pos_film = pos_film
+        self.trunk_2 = trunk_2
+        self.cam_film = cam_film
         self.to_color = to_color
+        self.cameras = cameras
+        self.img_size = img_size
+        self.pix_id = camera_idx_flat = torch.arange(
+            len(cameras), device=cameras.device
+        ).repeat_interleave(img_size * img_size).view(-1, 1)
 
     def forward(self, fragments, meshes, **kwargs):
         verts_world = meshes.verts_packed()
@@ -91,21 +105,42 @@ class NeuralFragmentShader(torch.nn.Module):
         )
 
         pixel_positions_flat = pixel_positions.view(-1, 3)
-        pixel_latents_flat = pixel_latents.view(-1, self.latent_dim)
+        pixel_latents_flat = pixel_latents.view(-1, self.latent_dim)  # (N*H*W, latent_dim)
+
+        trunk_embedding = self.trunk_1(pixel_latents_flat)  # (N*H*W, hidden_dim)
 
         pos_encoded = compute_targeted_encodings(
             pixel_positions_flat,
             target_dim=self.pos_dims,
-            scheme='spiral',
+            scheme='sinusoidal',
         )
 
-        base_features = self.latent_trunk(pixel_latents_flat.float())  # (N*H*W, hidden_dim)
-        film_params = self.pos_film(pos_encoded)  # (N*H*W, hidden_dim * 2)
-        gamma, beta = torch.chunk(film_params, 2, dim=-1)
+        pos_features = self.pos_film(pos_encoded)  # (N*H*W, hidden_dim)
+        pos_gamma, pos_beta = torch.chunk(pos_features, 2, dim=-1)
 
-        modulated_features = gamma * base_features + beta
-        colors_flat = self.to_color(modulated_features)
+        trunk_embedding = (trunk_embedding * pos_gamma) + pos_beta  # (N*H*W, hidden_dim)
+        activated_embeddings = F.gelu(trunk_embedding)  # (N*H*W, hidden_dim)
 
+        trunk_2_input = torch.cat([activated_embeddings, pixel_latents_flat], dim=-1)  # (N*H*W, hidden_dim + latent_dim)
+        trunk_embedding = self.trunk_2(trunk_2_input)  # (N*H*W, hidden_dim)
+
+        cam_positions = self.cameras.get_camera_center().view(-1, 3)  # (N, 3)
+        cam_quaternions = matrix_to_quaternion(self.cameras.R)
+        cam_fovs = self.cameras.fov.view(-1, 1) 
+
+        cam_features = torch.cat([cam_positions, cam_quaternions, cam_fovs], dim=-1)  # (N, 3 + 4 + 1)
+        cam_film_params = self.cam_film(cam_features)  # (N, hidden_dim *
+
+        cam_gamma, cam_beta = torch.chunk(cam_film_params, 2, dim=-1)
+
+        pix_id_flat = self.pix_id.view(-1)  # (N*H*W,)
+        gamma_per_pixel = torch.index_select(cam_gamma, dim=0, index=pix_id_flat)  # (N*H*W, hidden_dim)
+        beta_per_pixel  = torch.index_select(cam_beta,  dim=0, index=pix_id_flat)  # (N*H*W, hidden_dim)
+        modulated_features = (trunk_embedding * gamma_per_pixel) + beta_per_pixel
+        activated_features = F.gelu(modulated_features)  # (N*H*W, hidden_dim)
+
+        final_input = torch.cat([activated_features, pixel_latents_flat], dim=-1)  # (N*H*W, hidden_dim + latent_dim)
+        colors_flat = self.to_color(final_input)
         colors = colors_flat.view(fragments.pix_to_face.shape[:3] + (4,))
         return colors
 
@@ -273,7 +308,7 @@ def fibonacci_cameras(
 
 def sample_random_cameras(
     n_cameras=32,
-    dist_range=(1.0, 3.0),
+    dist_range=(1.5, 3.0),
     elev_range=(-60, 60),
     azim_range=(0, 360),
     fov_range=(30, 90),
@@ -430,8 +465,10 @@ def make_rasterizer(
 def print_grad_norms(model, latent_mesh):
     grad_norms = {}
     for name, module in [
-        ("latent_trunk", model.latent_trunk),
+        ("trunk_1", model.trunk_1),
         ("pos_film", model.pos_film),
+        ("trunk_2", model.trunk_2),
+        ("cam_film", model.cam_film),
         ("to_color", model.to_color),
     ]:
         norm = 0.0
@@ -454,7 +491,7 @@ def render_base_mesh(base_mesh, camera_batch, lights, img_size):
 
 def render_neural_mesh(camera_batch, lights, latent_mesh, model, img_size):
     rasterizer = make_rasterizer(camera_batch, image_size=img_size, device="cuda")
-    neural_shader = model.get_frag_shader(camera_batch, lights)
+    neural_shader = model.get_frag_shader(camera_batch, lights, img_size)
     neural_renderer = MeshRenderer(rasterizer=rasterizer, shader=neural_shader)
     neural_mesh = latent_mesh.get_mesh()
     neural_mesh_batch = neural_mesh.extend(camera_batch.R.shape[0])
@@ -499,7 +536,7 @@ def train_latent_mesh(source_mesh: MeshData, model: torch.nn.Module, latent_mesh
     base_mesh = meshdata_to_pytorch3d_mesh(source_mesh)
     
     params = list(model.parameters()) + list(latent_mesh.parameters())
-    opt = SOAP(params, lr=1e-3, weight_decay=1e-4)
+    opt = SOAP(params, lr=1e-3)
     ssim_loss = SSIMLoss().to("cuda")
 
     model.train()
@@ -508,33 +545,44 @@ def train_latent_mesh(source_mesh: MeshData, model: torch.nn.Module, latent_mesh
     n_cameras = 16
 
     # fib_cameras = fibonacci_cameras(n_cameras=max_cameras)
-    cameras = select_coverage_cameras(
-        n_cameras,
-        base_mesh,
-        latent_mesh,
-        model,
-        lights,
-        weight_by_error=False
-    )
+    cameras = fibonacci_cameras(n_cameras, dist=2.5)
+    # cameras = select_coverage_cameras(
+    #     n_cameras,
+    #     base_mesh,
+    #     latent_mesh,
+    #     model,
+    #     lights,
+    #     weight_by_error=False
+    # )
 
     for epoch in range(10000):
-        if epoch == 5000:
-            n_cameras = 8
-            image_size = 512
-        if epoch == 9000:
-            n_cameras = 4
-            image_size = 1024
-
-        if epoch % 500 == 0 and epoch > 0:
-            print("Reselecting cameras after 500 epochs...")
+        if epoch % 25 == 0 and epoch > 0:
             cameras = select_coverage_cameras(
                 n_cameras,
                 base_mesh,
                 latent_mesh,
                 model,
                 lights,
-                weight_by_error=True,
+                weight_by_error=False
             )
+
+        # if epoch == 5000:
+        #     n_cameras = 8
+        #     image_size = 512
+        # if epoch == 9000:
+        #     n_cameras = 4
+        #     image_size = 1024
+
+        # if epoch % 500 == 0 and epoch > 0:
+        #     print("Reselecting cameras after 500 epochs...")
+        #     cameras = select_coverage_cameras(
+        #         n_cameras,
+        #         base_mesh,
+        #         latent_mesh,
+        #         model,
+        #         lights,
+        #         weight_by_error=True,
+        #     )
 
         base_images = render_base_mesh(base_mesh, cameras, lights, image_size)
         images = render_neural_mesh(cameras, lights, latent_mesh, model, image_size)
@@ -543,8 +591,9 @@ def train_latent_mesh(source_mesh: MeshData, model: torch.nn.Module, latent_mesh
         laplacian_loss = compute_ssim_loss(images, base_images, reduction="mean", use_laplacian=True)
         color_loss = F.l1_loss(images[..., :3], base_images[..., :3], reduction="mean")
 
-        all_loss = base_loss + laplacian_loss + color_loss
-        mean_loss = all_loss.mean()
+        # all_loss = base_loss + laplacian_loss + color_loss
+        # mean_loss = all_loss.mean()
+        mean_loss = base_loss
         opt.zero_grad()
         mean_loss.backward()
 
@@ -565,7 +614,7 @@ def train_latent_mesh(source_mesh: MeshData, model: torch.nn.Module, latent_mesh
 if __name__ == "__main__":
     # Load the mesh data
     mesh_data = load_fbx_to_meshdata("static/Moon.fbx")
-    latent_dim = 4
+    latent_dim = 12
     for mesh in mesh_data:
         model = NikaNet(latent_dim=latent_dim).to("cuda")
         latent_mesh = LatentMesh(mesh, latent_dim=latent_dim).to("cuda")
