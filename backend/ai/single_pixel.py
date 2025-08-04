@@ -57,6 +57,18 @@ class VFXNet(nn.Module):
             return self.decoder(raw_pos, control[:, 0:1], self.latent)
         else:
             return self.decoder(raw_pos, control[:, 0:1])
+    
+    def run_patch(self, raw_pos, control):
+        # This method is used for running a patch of the image
+        # Flatten raw_pos and control to (N, ...) where N = patch_size*patch_size
+        print(f"Running patch with raw_pos shape: {raw_pos.shape}, control shape: {control.shape}")
+        flat_raw_pos = raw_pos.view(-1, raw_pos.shape[-1])
+        flat_control = control.view(-1, control.shape[-1])
+        print(f"Flattened raw_pos shape: {flat_raw_pos.shape}, flattened control shape: {flat_control.shape}")
+        if self.decoder.latent_dim > 0:
+            return self.decoder(flat_raw_pos, flat_control, self.latent).view(*raw_pos.shape[:-1], self.output_channels)
+        else:
+            return self.decoder(flat_raw_pos, flat_control).view(*raw_pos.shape[:-1], self.output_channels)
 
     def full_image(self, control, H=None, W=None):
         # Expand control to match the first dimension of self.raw_pos
@@ -197,24 +209,31 @@ def subsample_random_pixels(num_samples, image_tensor, raw_pos, control_tensor):
 
 
 class PatchSampler(torch.utils.data.IterableDataset):
-    def __init__(self, image_tensor, tile_size=32):
-        self.image_tensor = image_tensor
+    def __init__(self, image_tensor, tile_size=32, batch_size=8, device='cuda'):
+        self.device = device
         self.tile_size = tile_size
         self.margin_size = self.tile_size // 2
-        self.T, self.H, self.W, self.C = self.image_tensor.shape
-        xs = torch.arange(self.W) / (self.W - 1)
-        ys = torch.arange(self.H) / (self.H - 1)
-        self.ts = torch.arange(self.T) / (self.T - 1)
-        self.raw_pos = torch.stack(torch.meshgrid(ys, xs, indexing='ij'), dim=-1)
+        self.image_tensor = image_tensor.permute(0, 3, 1, 2)  # Change to NCHW format
+        self.T, self.C, self.H, self.W = self.image_tensor.shape
+        
+        dx = self.margin_size / self.W
+        dy = self.margin_size / self.H
+        self.kernel_x = torch.linspace(-dx, dx, tile_size, device=device)
+        self.kernel_y = torch.linspace(-dy, dy, tile_size, device=device)
+
+        self.patch_kernel = torch.stack(torch.meshgrid(self.kernel_y, self.kernel_x, indexing='ij'), dim=-1)  # (tile_size, tile_size, 2)
+        self.batch_size = batch_size
 
     def __iter__(self):
-        t = torch.randint(0, self.T, (1,)).item()
-        x = torch.randint(self.margin_size, self.W - self.margin_size, (1,)).item()
-        y = torch.randint(self.margin_size, self.H - self.margin_size, (1,)).item()
-        image_patch = self.image_tensor[t, (y - self.margin_size):(y + self.margin_size), (x - self.margin_size):(x + self.margin_size), :]
-        raw_pos_patch = self.raw_pos[(y - self.margin_size):(y + self.margin_size), (x - self.margin_size):(x + self.margin_size), :]
-        t_patch = self.ts[t].repeat(self.tile_size, self.tile_size, 1)
-        yield (image_patch, raw_pos_patch, t_patch)
+        times = torch.randint(0, self.T, (self.batch_size,), device=self.device)
+        image_batch = self.image_tensor[times]
+        patch_centers = torch.rand((self.batch_size, 2), device=self.device) * 2 - 1
+        patch_grid = self.patch_kernel.unsqueeze(0) + patch_centers[:, None, None, :]  # [B, tile, tile, 2]
+        
+        patch_batch = F.grid_sample(image_batch, patch_grid).requires_grad_(True)  # [B, C, tile, tile]
+        patch_grid = (patch_grid + 1 / 2)
+        times = times / self.T
+        yield (patch_batch, patch_grid, times)
 
 
 def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, experiment_name=None, decoder_config=None):
@@ -241,7 +260,7 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
 
     dataloader = DataLoader(
         dataset,
-        batch_size=batch_size,
+        batch_size=8,
     )
 
     total_pixel_loss = 0.0
@@ -250,9 +269,10 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
 
         print(f"Epoch {epoch+1}/{epochs} - Pixel loss: {total_pixel_loss:.4f}")
         total_pixel_loss = 0.0
-        for batch_num, (image, raw_pos_batch, control_batch) in enumerate(dataloader):
-            print(f"Batch {batch_num+1} - Image shape: {image.shape}, Raw pos shape: {raw_pos_batch.shape}, Control shape: {control_batch.shape}")
-            reconstructed_image = model(raw_pos_batch, control_batch)
+        for batch_num, (image_patches, raw_pos_patches, control_patches) in enumerate(dataloader):
+            print(f"Batch {batch_num+1} - Image shape: {image_patches.shape}, Raw pos shape: {raw_pos_patches.shape}, Control shape: {control_patches.shape}")
+            reconstructed_image = model.run_patch(raw_pos_patches, control_patches)
+            print(f"Reconstructed image shape: {reconstructed_image.shape}, Expected shape: {image_patches.shape}")
             if batch_num % 100 == 0:
                 print(f"Batch {batch_num+1}/{num_batches}")
             pixel_loss = (
