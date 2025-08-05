@@ -59,14 +59,13 @@ class VFXNet(nn.Module):
             return self.decoder(raw_pos, control[:, 0:1])
     
     def run_patch(self, raw_pos, control):
-        # This method is used for running a patch of the image
-        # Flatten raw_pos and control to (N, ...) where N = patch_size*patch_size
-        print(f"Running patch with raw_pos shape: {raw_pos.shape}, control shape: {control.shape}")
         flat_raw_pos = raw_pos.view(-1, raw_pos.shape[-1])
-        flat_control = control.view(-1, control.shape[-1])
-        print(f"Flattened raw_pos shape: {flat_raw_pos.shape}, flattened control shape: {flat_control.shape}")
+        B = control.shape[0]
+        expanded_control = control.repeat(raw_pos.shape[1], raw_pos.shape[2], 1)
+        flat_control = expanded_control.reshape(-1, control.shape[-1])
+
         if self.decoder.latent_dim > 0:
-            return self.decoder(flat_raw_pos, flat_control, self.latent).view(*raw_pos.shape[:-1], self.output_channels)
+            raise NotImplementedError("Latent images not supported in run_patch")
         else:
             return self.decoder(flat_raw_pos, flat_control).view(*raw_pos.shape[:-1], self.output_channels)
 
@@ -225,21 +224,21 @@ class PatchSampler(torch.utils.data.IterableDataset):
         self.batch_size = batch_size
 
     def __iter__(self):
-        times = torch.randint(0, self.T, (self.batch_size,), device=self.device)
-        image_batch = self.image_tensor[times]
-        patch_centers = torch.rand((self.batch_size, 2), device=self.device) * 2 - 1
-        patch_grid = self.patch_kernel.unsqueeze(0) + patch_centers[:, None, None, :]  # [B, tile, tile, 2]
-        
-        patch_batch = F.grid_sample(image_batch, patch_grid).requires_grad_(True)  # [B, C, tile, tile]
-        patch_grid = (patch_grid + 1 / 2)
-        times = times / self.T
-        yield (patch_batch, patch_grid, times)
+        while True:
+            times = torch.randint(0, self.T, (self.batch_size,), device=self.device)
+            image_batch = self.image_tensor[times]
+            patch_centers = torch.rand((self.batch_size, 2), device=self.device) * 2 - 1
+            patch_grid = self.patch_kernel.unsqueeze(0) + patch_centers[:, None, None, :]  # [B, tile, tile, 2]
+            
+            patch_batch = F.grid_sample(image_batch, patch_grid).requires_grad_(True)  # [B, C, tile, tile]
+            patch_grid = (patch_grid + 1 / 2)
+            times = times.float().unsqueeze(1) / self.T  # Shape: (batch_size, 1)
+            yield (patch_batch, patch_grid, times)
 
 
 def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, experiment_name=None, decoder_config=None):
     image_tensor = load_images(image_dir, device=device)
     shape = image_tensor.shape[1:]
-    dataset = PatchSampler(image_tensor)
 
     mse_loss = nn.MSELoss().to(device)
     dct_loss = DCTLoss().to(device)
@@ -256,58 +255,61 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
     base_path = f"anim_tests/{model.experiment_name}"
     os.makedirs(os.path.dirname(base_path), exist_ok=True)
 
+    dataset = PatchSampler(image_tensor, batch_size=64)
+    dataloader = DataLoader(dataset, batch_size=None)
     log_epochs = list(range(0, 11, 1)) + list(range(10, 51, 5)) + list(range(50, 101, 10)) + list(range(100, 501, 50)) + list(range(500, 1001, 100))
 
-    dataloader = DataLoader(
-        dataset,
-        batch_size=8,
-    )
-
+    batches_per_epoch = 1000
     total_pixel_loss = 0.0
     for epoch in range(epochs):
         model.train()
 
         print(f"Epoch {epoch+1}/{epochs} - Pixel loss: {total_pixel_loss:.4f}")
+        batch_num = 0
         total_pixel_loss = 0.0
-        for batch_num, (image_patches, raw_pos_patches, control_patches) in enumerate(dataloader):
-            print(f"Batch {batch_num+1} - Image shape: {image_patches.shape}, Raw pos shape: {raw_pos_patches.shape}, Control shape: {control_patches.shape}")
-            reconstructed_image = model.run_patch(raw_pos_patches, control_patches)
-            print(f"Reconstructed image shape: {reconstructed_image.shape}, Expected shape: {image_patches.shape}")
+        for image_patches, pos_patches, t_patches in dataloader:
+            reconstructed_image = model.run_patch(pos_patches, t_patches)[..., :3]
+            # Permute reconstructed_image from [B, H, W, C] to [B, C, H, W] and select first 3 channels
+            reconstructed_image_patches = reconstructed_image.permute(0, 3, 1, 2)
             if batch_num % 100 == 0:
-                print(f"Batch {batch_num+1}/{num_batches}")
+                print(f"Batch {batch_num+1}/{batches_per_epoch}")
             pixel_loss = (
-                0.1 * mse_loss(reconstructed_image, image) +
-                0.15 * dct_loss(reconstructed_image, image) +
-                0.75 * F.l1_loss(reconstructed_image, image)
+                0.1 * mse_loss(reconstructed_image_patches, image_patches) +
+                0.15 * dct_loss(reconstructed_image_patches, image_patches) +
+                0.75 * F.l1_loss(reconstructed_image_patches, image_patches)
             )
             optimizer.zero_grad()
             pixel_loss.backward()
             optimizer.step()
             total_pixel_loss += pixel_loss.item()
-        
-        if epoch in log_epochs:
-            epoch_dir = f"{base_path}/epoch_{epoch}"
-            os.makedirs(epoch_dir, exist_ok=True)
-            model.eval()  # Set model to evaluation mode
-            with torch.no_grad():
-                reconstructed_batch, sampled_controls = save_images(model, control_tensor, H=512, W=1024, base_dir=epoch_dir)
+            batch_num += 1
+            if batch_num >= batches_per_epoch:
+                break
+        total_pixel_loss /= batches_per_epoch
+ 
+        # if epoch in log_epochs:
+        #     epoch_dir = f"{base_path}/epoch_{epoch}"
+        #     os.makedirs(epoch_dir, exist_ok=True)
+        #     model.eval()  # Set model to evaluation mode
+        #     with torch.no_grad():
+        #         reconstructed_batch, sampled_controls = save_images(model, control_tensor, H=512, W=1024, base_dir=epoch_dir)
 
-                print(f"batch device: {reconstructed_batch.device}, control_tensor device: {control_tensor.device}")
+        #         print(f"batch device: {reconstructed_batch.device}, control_tensor device: {control_tensor.device}")
 
-                ssim_scores = compute_ssim_scores(reconstructed_batch, sampled_controls, image_tensor, (model.height, model.width), control_tensor, ssim_loss_fn=ssim_loss, update=False)
-                avg_ssim = sum(ssim_scores) / len(ssim_scores)
+        #         ssim_scores = compute_ssim_scores(reconstructed_batch, sampled_controls, image_tensor, (model.height, model.width), control_tensor, ssim_loss_fn=ssim_loss, update=False)
+        #         avg_ssim = sum(ssim_scores) / len(ssim_scores)
 
-                # print(f"Average SSIM for epoch {epoch}: {avg_ssim:.4f}")
-                metrics_path = f"png_tests/{model.experiment_name}/epoch_{epoch}/summary.json"
-                os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
-                with open(metrics_path, "w") as f:
-                    json.dump({
-                        "epoch": epoch,
-                        # "loss": pixel_loss.item(),
-                        "avg_ssim": avg_ssim,
-                        "ssim_per_frame": ssim_scores,
-                        "decoder_config": decoder_config
-                    }, f, indent=2)
+        #         # print(f"Average SSIM for epoch {epoch}: {avg_ssim:.4f}")
+        #         metrics_path = f"png_tests/{model.experiment_name}/epoch_{epoch}/summary.json"
+        #         os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
+        #         with open(metrics_path, "w") as f:
+        #             json.dump({
+        #                 "epoch": epoch,
+        #                 # "loss": pixel_loss.item(),
+        #                 "avg_ssim": avg_ssim,
+        #                 "ssim_per_frame": ssim_scores,
+        #                 "decoder_config": decoder_config
+        #             }, f, indent=2)
 
 
 def get_total_grad_norm(model, norm_type=2):
