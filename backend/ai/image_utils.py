@@ -135,26 +135,19 @@ def load_images(image_dir, device, input_image_channels=4, control_channels=2, n
 
     return normalized_frames
 
-def save_images(model, control_tensor, H=256, W=256, n=5, base_dir=None, write_files=True):
+def save_images(model, H=256, W=256, n_images=5, gif_frames=20, base_dir=None, write_files=True):
     with torch.no_grad():
-        # Randomly select n unique control vectors
-        indices = torch.randperm(control_tensor.size(0))[:n]
-        selected_controls = control_tensor[indices]
+        times = torch.rand(n_images, device=model.device)
 
         # Generate reconstructed RGB images for each selected control vector
-        for i, control in enumerate(selected_controls):
-            reconstructed_rgb = model.full_image(control.unsqueeze(0), H=H, W=W)  # Pass control vector to model
+        for i, time in enumerate(times):
+            reconstructed_rgb = model.full_image(time, H=H, W=W)  # Pass control vector to model
             rgb_image = reconstructed_rgb.squeeze(0).permute(2, 0, 1)  # [C, H, W]
 
             if write_files:
-                control_details = "_".join(f"{val:.2f}" for val in control.cpu().numpy())
-                rgb_path = os.path.join(base_dir, f"reconstructed_rgb_{control_details}.png")
+                rgb_path = os.path.join(base_dir, f"reconstructed_rgb_{time}.png")
                 save_image(rgb_image, rgb_path)
 
-        # Save the shared latent image as an EXR file
-        # latent_path = os.path.join(epoch_dir, "test_latent.exr")
-        # sample_latent = model.latents(torch.tensor([0], device="cuda"))  # [1, H*W*C]
-        # latent_grid = sample_latent.view(model.height, model.width, 4)
         gif_path = None
         if write_files:
             # save_latent_to_exr(latent_grid, latent_path)
@@ -162,33 +155,18 @@ def save_images(model, control_tensor, H=256, W=256, n=5, base_dir=None, write_f
             torch.save(model.state_dict(), model_path)
             gif_path = os.path.join(base_dir, "control_animation.gif")
 
-        reconstructed_batch, sampled_controls = generate_control_animation(model, control_tensor, H=H, W=W, gif_path=gif_path, write_files=write_files)
-    return reconstructed_batch, sampled_controls
+        generate_control_animation(model, H=H, W=W, num_frames=gif_frames, gif_path=gif_path, write_files=write_files)
 
 
-def generate_control_animation(model, control_tensor, H=256, W=256, num_frames=20, control_axis=None, fixed_values=None, write_files=True, gif_path=None):
-    if control_axis is None:
-        control_axis = 0  # Default to time axis
+def generate_control_animation(model, H, W, num_frames=20, gif_path=None, write_files=True):
+    time_control = torch.linspace(0, 1, num_frames, device=model.device).unsqueeze(1)  # [num_frames, 1]
 
-    # Create a base control vector with fixed values
-    base_control = torch.zeros(control_tensor.size(1), device=control_tensor.device)
-    if fixed_values:
-        for axis, value in fixed_values.items():
-            base_control[axis] = value
-
-    # Generate sampled control vectors along the specified axis
-    sampled_controls = []
-    for i in range(num_frames):
-        control = base_control.clone()
-        control[control_axis] = i / (num_frames - 1)  # Linearly interpolate from 0 to 1
-        sampled_controls.append(control)
-    sampled_controls = torch.stack(sampled_controls)
     # Generate frames
     frames = []
     outputs = []
     with torch.no_grad():
-        for control in sampled_controls:
-            reconstructed = model.full_image(control.unsqueeze(0), H=H, W=W)  # Pass control vector to model
+        for time in time_control:
+            reconstructed = model.full_image(time, H=H, W=W)  # Pass control vector to model
             outputs.append(reconstructed)
             output_image = reconstructed.squeeze(0).cpu().numpy()  # [H, W, C]
 
@@ -213,7 +191,6 @@ def generate_control_animation(model, control_tensor, H=256, W=256, num_frames=2
             duration=40,
             loop=0
         )
-    return torch.stack(outputs), sampled_controls
 
 def generate_control_grid_animation(model, control_tensor, gif_path, num_frames=50, axis_1=0, axis_2=1, axis_2_values=None):
     """
