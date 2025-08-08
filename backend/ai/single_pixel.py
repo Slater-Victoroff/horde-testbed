@@ -198,7 +198,7 @@ def subsample_random_pixels(num_samples, image_tensor, raw_pos, control_tensor):
 
 
 class PatchSampler(torch.utils.data.IterableDataset):
-    def __init__(self, image_tensor, tile_size=32, batch_size=8, device='cuda'):
+    def __init__(self, image_tensor, tile_size=32, batch_size=8, dtype=torch.float32, device='cuda'):
         self.device = device
         self.tile_size = tile_size
         self.margin_size = self.tile_size // 2
@@ -207,28 +207,33 @@ class PatchSampler(torch.utils.data.IterableDataset):
         
         dx = self.margin_size / self.W
         dy = self.margin_size / self.H
-        self.kernel_x = torch.linspace(-dx, dx, tile_size, device=device)
-        self.kernel_y = torch.linspace(-dy, dy, tile_size, device=device)
+        self.kernel_x = torch.linspace(-dx, dx, tile_size, dtype=image_tensor.dtype, device=device)
+        self.kernel_y = torch.linspace(-dy, dy, tile_size, dtype=image_tensor.dtype, device=device)
 
         self.patch_kernel = torch.stack(torch.meshgrid(self.kernel_y, self.kernel_x, indexing='ij'), dim=-1)  # (tile_size, tile_size, 2)
         self.batch_size = batch_size
+        self.dtype = dtype
 
     def __iter__(self):
         while True:
-            times = torch.randint(0, self.T, (self.batch_size,), device=self.device)
-            image_batch = self.image_tensor[times]
-            patch_centers = torch.rand((self.batch_size, 2), device=self.device) * 2 - 1
+            times = torch.randint(0, self.T, (self.batch_size,), device=self.image_tensor.device)
+            image_batch = self.image_tensor[times].to(device=self.device)  # Move to GPU
+            patch_centers = torch.rand((self.batch_size, 2), dtype=self.image_tensor.dtype, device=self.device) * 2 - 1
             patch_grid = self.patch_kernel.unsqueeze(0) + patch_centers[:, None, None, :]  # [B, tile, tile, 2]
             
             patch_batch = F.grid_sample(image_batch, patch_grid).requires_grad_(True)  # [B, C, tile, tile]
             patch_grid = (patch_grid + 1) / 2
 
             times_patch = times.float().view(-1, 1, 1, 1).expand(-1, self.tile_size, self.tile_size, 1)
-            yield (patch_batch, patch_grid, times_patch / self.T)
+            yield (
+                patch_batch.to(dtype=self.dtype, device=self.device),
+                patch_grid.to(dtype=self.dtype, device=self.device),
+                (times_patch / self.T).to(dtype=self.dtype, device=self.device)
+            )
 
 
 def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, experiment_name=None, decoder_config=None):
-    image_tensor = load_images(image_dir, device=device)
+    image_tensor = load_images(image_dir)
     shape = image_tensor.shape[1:]
 
     mse_loss = nn.MSELoss().to(device)

@@ -8,6 +8,7 @@ import imageio.v3 as iio
 from PIL import Image
 from torchvision.utils import save_image
 from torchvision.datasets import MovingMNIST
+from skimage.color import yuv2rgb
 
 from make_shader import save_latent_to_exr
 
@@ -61,77 +62,34 @@ def load_exr_image(image_path):
     return rgba
 
 
-def load_images(image_dir, device, input_image_channels=4, control_channels=2, norm=True, add_next=False):
-    if "moving_mnist" in image_dir.name:
-        input_image_channels = 1
+def load_images(image_dir, input_image_channels=4, control_channels=2, norm=True, add_next=False):
+    gif_files = [gif for gif in image_dir.glob("**/*.gif") if gif.name != "debug.gif"]
+    png_files = [png for png in image_dir.glob("**/*.png") if png.name != "debug.png"]
 
-    if "moving_mnist" in image_dir.name:
-        dataset = MovingMNIST(root="ref_data", split=None, download=True)
-        for sequence_idx, video in enumerate(dataset[:5]):
-            # video: [T, 1, H, W], convert to numpy for consistency
-            video = video.squeeze(1).numpy()  # [T, H, W]
-            video = video / 255.0  # normalize
+    if gif_files:
+        if len(gif_files) > 1:
+            raise ValueError("Multiple GIF files found (excluding debug.gif). Please provide only one GIF file.")
+        gif_path = gif_files[0]
+        frames = iio.imread(gif_path, plugin="pillow")  # Load all frames from the GIF
+        # Check overall size of the GIF frames
 
-            if add_next:
-                prior_frame = None
-            for frame_idx, frame in enumerate(video):
-                frame = np.expand_dims(frame, axis=-1)
-                if add_next:
-                    if prior_frame is not None:
-                        _process_frame(frame, frame_idx, sequence_idx, prior_frame)
-                    prior_frame = frame
-                else:
-                    _process_frame(frame, frame_idx, sequence_idx)
+    elif png_files:
+        # sort files by numeric portion of the filename
+        png_files.sort(key=lambda x: int(re.search(r'\d+', x.name).group()))
+        png_frames = []
+        for png_file in png_files:
+            png_frame = iio.imread(png_file, plugin="pillow")
+            png_frames.append(png_frame)
+        frames = np.array(png_frames, dtype=np.float16)
+    num_bytes = frames.nbytes
+    if num_bytes > 2 * 1024 * 1024 * 1024:
+        device = "cpu"
+        print(f"PNG files are too large to load into GPU: {num_bytes} bytes, loading on CPU instead.")
     else:
-        # Check for GIF files in the directory
-        gif_files = [gif for gif in image_dir.glob("**/*.gif") if gif.name != "debug.gif"]
-        png_files = [png for png in sorted(image_dir.glob("**/*.png")) if png.name != "debug.png"]
-        exr_files = [exr for exr in sorted(image_dir.glob("**/*.exr")) if exr.name != "debug.exr"]
-        if gif_files:
-            if len(gif_files) > 1:
-                raise ValueError("Multiple GIF files found (excluding debug.gif). Please provide only one GIF file.")
-            gif_path = gif_files[0]
-            gif_frames = iio.imread(gif_path, plugin="pillow")  # Load all frames from the GIF
-            # Check overall size of the GIF frames
-            num_bytes = gif_frames.nbytes
-            if num_bytes > 4 * 1024 * 1024 * 1024:  # 4 GB limit
-                raise ValueError(f"GIF file is too large to load into GPU: {num_bytes} bytes")
-            else:
-                with torch.no_grad():
-                    gif_frames = torch.tensor(gif_frames, dtype=torch.float32, device=device)
-                    normalized_frames = gif_frames / 255.0
-
-
-        elif png_files:
-            if add_next:
-                prior_frame = None
-            for image_path in png_files:
-                image = Image.open(image_path).convert("RGBA")
-                image = np.array(image) / 255.0
-                matches = re.findall(r'\d+', image_path.stem)
-                time = int(matches[0])
-                if add_next:
-                    if prior_frame is not None:
-                        _process_frame(image, time, int(matches[1]), prior_frame)
-                    prior_frame = image
-                else:
-                    _process_frame(image, time)
-
-        elif exr_files:
-            # Process EXR files
-            if add_next:
-                prior_frame = None
-            for image_path in exr_files:  # Assuming EXR images
-                image = load_exr_image(image_path)
-                # Extract control values from the filename using regex
-                matches = re.findall(r'\d+', image_path.stem)
-                time = int(matches[1])
-                if add_next:
-                    if prior_frame is not None:
-                        _process_frame(image, time, int(matches[0]), prior_frame)
-                    prior_frame = image
-                else:
-                    _process_frame(image, time)
+        device = "cuda"
+    with torch.no_grad():
+        frames = torch.tensor(frames, dtype=torch.float16, device=device)
+        normalized_frames = frames / 255.0
 
     return normalized_frames
 
