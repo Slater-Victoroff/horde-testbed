@@ -56,7 +56,7 @@ class VFXNet(nn.Module):
         else:
             out = self.decoder(raw_pos, control[:, 0:1])
             return out
-    
+
     def run_patch(self, pos_patch, time_patch):
         flat_raw_pos = pos_patch.view(-1, pos_patch.shape[-1])
         flat_control = time_patch.view(-1, time_patch.shape[-1])
@@ -86,70 +86,70 @@ class VFXNet(nn.Module):
         return shaped_image
 
 
-def corresponding_original_frames(sampled_controls, image_tensor, shape, control_tensor):
+def corresponding_original_frames(sampled_controls, image_tensor):
     """
     Extract original frames that correspond to the sampled control values.
-    
+
     Args:
         sampled_controls: List of control tensors with time values
         image_tensor: Full tensor of all image data
         shape: Tuple of (H, W)
         control_tensor: Full control tensor
-    
+
     Returns:
         List of original frames matching the sampled controls
     """
-    H, W = shape
+    T, H, W, C = image_tensor.shape
+
     pixels_per_frame = H * W
-    T = control_tensor.shape[0] // pixels_per_frame
     original_frames = []
-    
+
     for control in sampled_controls:
-        t = control[0].item()
+        t = control.item()
         frame_idx = min(int(t * (T - 1)), T - 1)
         start = frame_idx * pixels_per_frame
         end = start + pixels_per_frame
         gt_frame = image_tensor[start:end].view(H, W, -1)
         original_frames.append(gt_frame)
-    
+
     return original_frames
 
 
 def compute_psnr_scores(reconstructed_frames, original_frames):
     """
     Compute PSNR scores between reconstructed frames and original frames.
-    
+
     Args:
         reconstructed_frames: List of reconstructed frames (H, W, C) tensors
         original_frames: List of original frames (H, W, C) tensors
-    
+
     Returns:
         List of PSNR values in dB
     """
     psnr_scores = []
-    
+
     with torch.no_grad():
         for recon, orig in zip(reconstructed_frames, original_frames):
             # Convert to NCHW format for piq.psnr
             recon_img = recon.permute(2, 0, 1).unsqueeze(0)
             orig_img = orig.permute(2, 0, 1).unsqueeze(0)
-            
+
             # Compute PSNR
             psnr_value = psnr(recon_img, orig_img, data_range=1.0)
             psnr_scores.append(psnr_value.item())
-    
+
     return psnr_scores
 
 
 def log_psnr_info(psnr_scores, sampled_controls, epoch):
     """
     Log PSNR statistics including min, max, and average values with corresponding frame info.
-    
+
     Args:
         psnr_scores: List of PSNR values
         sampled_controls: List of control tensors corresponding to each PSNR score
         epoch: Current epoch number
-        
+
     Returns:
         avg_psnr: Average PSNR value
     """
@@ -158,16 +158,16 @@ def log_psnr_info(psnr_scores, sampled_controls, epoch):
     max_psnr = max(psnr_scores)
     min_idx = psnr_scores.index(min_psnr)
     max_idx = psnr_scores.index(max_psnr)
-    
+
     # Get corresponding control values for min/max frames
     min_control = sampled_controls[min_idx]
     max_control = sampled_controls[max_idx]
     min_t = min_control[0].item()
     max_t = max_control[0].item()
-    
+
     print(f"Average PSNR for epoch {epoch}: {avg_psnr:.2f} dB")
     print(f"PSNR stats: min={min_psnr:.2f}dB (t={min_t:.3f}, frame_idx={min_idx}), max={max_psnr:.2f}dB (t={max_t:.3f}, frame_idx={max_idx})")
-    
+
     return avg_psnr
 
 
@@ -187,9 +187,10 @@ def compute_ssim_scores(
         torch.set_grad_enabled(True)
 
     for recon, orig in zip(reconstructed_batch, original_frames):
-        recon_img = recon.permute(2, 0, 1).unsqueeze(0).detach()
+        recon_img = recon.unsqueeze(0)
         gt_img = orig.permute(2, 0, 1).unsqueeze(0).detach()
 
+        print(recon_img.shape, gt_img.shape)
         if update:
             recon_img.requires_grad_(True)
             gt_img.requires_grad_(True)
@@ -268,7 +269,7 @@ class PatchSampler(torch.utils.data.IterableDataset):
         self.margin_size = self.tile_size // 2
         self.image_tensor = image_tensor.permute(0, 3, 1, 2)  # Change to NCHW format
         self.T, self.C, self.H, self.W = self.image_tensor.shape
-        
+
         dx = self.margin_size / self.W
         dy = self.margin_size / self.H
         self.kernel_x = torch.linspace(-dx, dx, tile_size, dtype=image_tensor.dtype, device=device)
@@ -284,7 +285,7 @@ class PatchSampler(torch.utils.data.IterableDataset):
             image_batch = self.image_tensor[times].to(device=self.device)  # Move to GPU
             patch_centers = torch.rand((self.batch_size, 2), dtype=self.image_tensor.dtype, device=self.device) * 2 - 1
             patch_grid = self.patch_kernel.unsqueeze(0) + patch_centers[:, None, None, :]  # [B, tile, tile, 2]
-            
+
             patch_batch = F.grid_sample(image_batch, patch_grid).requires_grad_(True)  # [B, C, tile, tile]
             patch_grid = (patch_grid + 1) / 2
 
@@ -303,7 +304,7 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
     dct_loss = DCTLoss().to(device)
     gradient_loss = GradientLoss().to(device)
     ssim_loss = SSIMLoss(data_range=1.0).to(device)
-    
+
     # Initialize TensorBoard writer
     experiment_name = experiment_name or datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = f'runs/{experiment_name}'
@@ -318,24 +319,24 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
         model.parameters(),
         weight_decay=0,
     )
-    
+
     # Log model architecture and hyperparameters
     writer.add_text('Model/Architecture', str(model), 0)
     writer.add_text('Model/Config', json.dumps(decoder_config or {}, indent=2), 0)
     writer.add_scalar('Hyperparameters/batch_size', batch_size, 0)
     writer.add_scalar('Hyperparameters/epochs', epochs, 0)
-    print(f"Train_dataloader_stats: {len(train_dataloader)} batches, {len(train_dataloader.dataset)} samples")
+    dataset = PatchSampler(image_tensor, batch_size=64)
+    dataloader = DataLoader(dataset, batch_size=None)
 
     # scheduler = CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-5)
 
     base_path = f"anim_tests/{model.experiment_name}"
     os.makedirs(os.path.dirname(base_path), exist_ok=True)
 
-    dataset = PatchSampler(image_tensor, batch_size=64)
-    dataloader = DataLoader(dataset, batch_size=None)
+
     log_epochs = list(range(0, 11, 1)) + list(range(10, 51, 5)) + list(range(50, 101, 10)) + list(range(100, 501, 50)) + list(range(500, 1001, 100))
 
-    batches_per_epoch = 1000
+    batches_per_epoch = 100
     total_pixel_loss = 0.0
     total_patch_loss = 0.0
     for epoch in range(epochs):
@@ -345,11 +346,13 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
         epoch_losses = []
         epoch_start_time = time.time()
         for image_patches, pos_patches, time_patches in dataloader:
+            if batch_num >= batches_per_epoch:
+                break
             batch_num += 1
             global_step += 1
-            
+
             if batch_num % 100 == 0:
-                print(f"Batch {batch_num}/{len(dataloader)}")
+                print(f"Epoch {epoch+1}/{epochs}, Batch {batch_num}/{batches_per_epoch}")
                 examples_per_sec = batch_num * batch_size / (time.time() - epoch_start_time)
                 print(f"Examples per second: {examples_per_sec:.2f}")
                 writer.add_scalar('Training/examples_per_second', examples_per_sec, global_step)
@@ -358,47 +361,47 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
             reconstructed_image_patches = reconstructed_image.permute(0, 3, 1, 2)
             patch_loss = ssim_loss(reconstructed_image_patches, image_patches)
 
-            if batch_num % 100 == 0:
-                print(f"Batch {batch_num+1}/{batches_per_epoch}")
-                
+            mse_loss_val = mse_loss(reconstructed_image_patches, image_patches)
+            dct_loss_val = dct_loss(reconstructed_image_patches, image_patches)
+            l1_loss_val = F.l1_loss(reconstructed_image_patches, image_patches)
             pixel_loss = (
-                0.1 * mse_loss(reconstructed_image_patches, image_patches) +
-                0.15 * dct_loss(reconstructed_image_patches, image_patches) +
-                0.75 * F.l1_loss(reconstructed_image_patches, image_patches)
+                0.1 * mse_loss_val +
+                0.15 * dct_loss_val +
+                0.75 * l1_loss_val
             )
-            
+
             # Log losses to TensorBoard
             writer.add_scalar('Loss/total', pixel_loss.item(), global_step)
             writer.add_scalar('Loss/mse', mse_loss_val.item(), global_step)
             writer.add_scalar('Loss/dct', dct_loss_val.item(), global_step)
             writer.add_scalar('Loss/l1', l1_loss_val.item(), global_step)
-            
+
             epoch_losses.append(pixel_loss.item())
 
             total_loss = pixel_loss + patch_loss
             optimizer.zero_grad()
             pixel_loss.backward()
-            
+
             # Log gradient norms
             if batch_num % 100 == 0:
                 grad_norm = get_total_grad_norm(model)
                 writer.add_scalar('Training/gradient_norm', grad_norm, global_step)
-            
+
             optimizer.step()
-            
+
             # Log learning rate
             writer.add_scalar('Training/learning_rate', optimizer.param_groups[0]['lr'], global_step)
-        
+
         # Log epoch metrics
         avg_epoch_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else 0
         epoch_duration = time.time() - epoch_start_time
         writer.add_scalar('Loss/epoch_average', avg_epoch_loss, epoch)
         writer.add_scalar('Training/epoch_duration', epoch_duration, epoch)
-        
-        reconstructed, sampled = save_images(model, control_tensor, write_files=False)
+
+        # TODO: probably don't always want to save out at full resolution
+        reconstructed, sampled = save_images(model, H=image_tensor.shape[1], W=image_tensor.shape[2], write_files=False)
         if epoch > 100:
-            H, W = model.height, model.width
-            original_frames = corresponding_original_frames(sampled, image_tensor, (H, W), control_tensor)
+            original_frames = corresponding_original_frames(sampled, image_tensor)
             ssim_scores = compute_ssim_scores(
                 reconstructed, original_frames,
                 update=True, ssim_loss_fn=ssim_loss, optimizer=optimizer
@@ -408,37 +411,34 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
                 avg_ssim_loss = sum(ssim_scores) / len(ssim_scores)
                 writer.add_scalar('Loss/ssim', avg_ssim_loss, epoch)
             batch_num += 1
-            if batch_num >= batches_per_epoch:
-                break
 
         if epoch in log_epochs:
             epoch_dir = f"{base_path}/epoch_{epoch}"
             os.makedirs(epoch_dir, exist_ok=True)
             model.eval()
-      
+
             print(f"Epoch {epoch+1} - Pixel loss: {total_pixel_loss:.4f}, Patch loss: {total_patch_loss:.4f}")
-            reconstructed_batch, sampled_controls = save_images(model, control_tensor, base_dir=epoch_dir)
-            
+            reconstructed_batch, sampled_controls = save_images(model, base_dir=epoch_dir)
+
             # Get original frames once
-            H, W = shape[0], shape[1]
-            original_frames_tensors = corresponding_original_frames(sampled_controls, image_tensor, (H, W), control_tensor)
-            
+            original_frames_tensors = corresponding_original_frames(sampled_controls, image_tensor)
+
             # Compute SSIM scores
             ssim_scores = compute_ssim_scores(reconstructed_batch, original_frames_tensors, ssim_loss_fn=ssim_loss, update=False)
             avg_ssim = sum(ssim_scores) / len(ssim_scores)
-            
+
             # Compute PSNR scores
             psnr_scores = compute_psnr_scores(reconstructed_batch, original_frames_tensors)
             avg_psnr = log_psnr_info(psnr_scores, sampled_controls, epoch)
-            
+
             # Log quality metrics to TensorBoard
             writer.add_scalar('Metrics/PSNR', avg_psnr, epoch)
             writer.add_scalar('Metrics/SSIM', avg_ssim, epoch)
-            
+
             # Log per-frame metrics as histograms
             writer.add_histogram('Metrics/PSNR_distribution', torch.tensor(psnr_scores), epoch)
             writer.add_histogram('Metrics/SSIM_distribution', torch.tensor(ssim_scores), epoch)
-            
+
             # Log sample images to TensorBoard
             if len(reconstructed_batch) > 0 and len(original_frames_tensors) > 0:
                 # Take first 4 frames for visualization
@@ -447,10 +447,10 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
                     # Convert from HWC to CHW for TensorBoard
                     recon_img = reconstructed_batch[i].permute(2, 0, 1)
                     orig_img = original_frames_tensors[i].permute(2, 0, 1)
-                    
+
                     writer.add_image(f'Reconstructed/frame_{i}', recon_img, epoch)
                     writer.add_image(f'Original/frame_{i}', orig_img, epoch)
-                    
+
                     # Add difference image
                     diff_img = torch.abs(recon_img - orig_img)
                     writer.add_image(f'Difference/frame_{i}', diff_img, epoch)
@@ -458,7 +458,7 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
             # Generate comparison GIF
             original_frames = [frame.cpu().numpy() for frame in original_frames_tensors]
             control_frames = [frame.squeeze(0).cpu().numpy() for frame in reconstructed_batch]
-            
+
             # Generate the comparison WebP
             comparison_path = os.path.join(epoch_dir, "comparison.webp")
             generate_comparison_gif(original_frames, control_frames, comparison_path)
@@ -476,10 +476,10 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
                     "psnr_per_frame": psnr_scores,
                     "decoder_config": decoder_config
                 }, f, indent=2)
-                
+
             with torch.no_grad():
                 save_images(model, H=512, W=1024, n_images=5, gif_frames=250, base_dir=epoch_dir)
-    
+
     # Close TensorBoard writer
     writer.close()
     print(f"\nTraining complete! View results with: tensorboard --logdir=runs/{experiment_name}")
@@ -495,4 +495,3 @@ def get_total_grad_norm(model, norm_type=2):
             total_norm += param_norm.item() ** norm_type
     total_norm = total_norm ** (1. / norm_type)
     return total_norm
-

@@ -94,6 +94,7 @@ def load_images(image_dir, input_image_channels=4, control_channels=2, norm=True
     return normalized_frames
 
 def save_images(model, H=256, W=256, n_images=5, gif_frames=20, base_dir=None, write_files=True):
+    reconstructured_images = []
     with torch.no_grad():
         times = torch.rand(n_images, device=model.device)
 
@@ -101,6 +102,7 @@ def save_images(model, H=256, W=256, n_images=5, gif_frames=20, base_dir=None, w
         for i, time in enumerate(times):
             reconstructed_rgb = model.full_image(time, H=H, W=W)  # Pass control vector to model
             rgb_image = reconstructed_rgb.squeeze(0).permute(2, 0, 1)  # [C, H, W]
+            reconstructured_images.append(rgb_image)
 
             if write_files:
                 rgb_path = os.path.join(base_dir, f"reconstructed_rgb_{time}.png")
@@ -114,7 +116,7 @@ def save_images(model, H=256, W=256, n_images=5, gif_frames=20, base_dir=None, w
             gif_path = os.path.join(base_dir, "control_animation.webp")
 
         generate_control_animation(model, H=H, W=W, num_frames=gif_frames, gif_path=gif_path, write_files=write_files)
-
+    return reconstructured_images, times
 
 def generate_control_animation(model, H, W, num_frames=20, gif_path=None, write_files=True):
     time_control = torch.linspace(0, 1, num_frames, device=model.device).unsqueeze(1)  # [num_frames, 1]
@@ -131,7 +133,7 @@ def generate_control_animation(model, H, W, num_frames=20, gif_path=None, write_
             # Gamma correction
             output_image = np.clip(output_image, 0, 1)
             # output_image = output_image ** (1 / 2.2)
-            
+
             # Preserve all channels including alpha
             if output_image.shape[-1] == 1:
                 frame = (output_image[..., 0] * 255).astype(np.uint8)
@@ -147,7 +149,7 @@ def generate_control_animation(model, H, W, num_frames=20, gif_path=None, write_
     if write_files:
         # Change extension to .webp
         webp_path = gif_path.replace('.gif', '.webp')
-        
+
         # Save as animated WebP with fast encoding
         frames[0].save(
             webp_path,
@@ -193,7 +195,7 @@ def generate_comparison_gif(original_frames, control_frames, gif_path, duration=
     - Top right: Control animation (reconstruction)
     - Bottom left: Diff between original and control
     - Bottom right: Renormalized diff (emphasizing areas with largest difference)
-    
+
     :param original_frames: List or tensor of original animation frames
     :param control_frames: List or tensor of control/reconstructed animation frames
     :param gif_path: Path to save the generated animation (will be saved as WebP)
@@ -204,34 +206,34 @@ def generate_comparison_gif(original_frames, control_frames, gif_path, duration=
         original_frames = [frame.cpu().numpy() for frame in original_frames]
     if torch.is_tensor(control_frames):
         control_frames = [frame.cpu().numpy() for frame in control_frames]
-    
+
     if len(original_frames) != len(control_frames):
         raise ValueError(f"Frame count mismatch: {len(original_frames)} original vs {len(control_frames)} control")
-    
+
     composite_frames = []
-    
+
     for orig_frame, ctrl_frame in zip(original_frames, control_frames):
         # Ensure frames are in [0, 1] range
         orig_frame = np.clip(orig_frame, 0, 1)
         ctrl_frame = np.clip(ctrl_frame, 0, 1)
-        
+
         # Calculate diff
         diff = (np.abs(orig_frame - ctrl_frame) + 1) / 2
         diff = np.clip(diff, 0, 1)
         # Add one and divide by two to get a range of [0, 1]
         directional_diff = np.clip((ctrl_frame - orig_frame + 1) / 2, 0, 1)
-        
+
         # Get dimensions
         h, w = orig_frame.shape[:2]
-        
+
         # Create 2x2 grid
         top_row = np.hstack([orig_frame, ctrl_frame])
         bottom_row = np.hstack([diff, directional_diff])
         composite = np.vstack([top_row, bottom_row])
-        
+
         # Convert to uint8
         composite_uint8 = (composite * 255).astype(np.uint8)
-        
+
         # Determine PIL mode based on channels - preserve alpha if present
         if len(composite_uint8.shape) == 2 or composite_uint8.shape[2] == 1:
             if len(composite_uint8.shape) == 3:
@@ -242,14 +244,14 @@ def generate_comparison_gif(original_frames, control_frames, gif_path, duration=
         else:
             composite_uint8 = composite_uint8[..., :3]
             pil_mode = "RGB"
-        
+
         composite_frames.append(Image.fromarray(composite_uint8, mode=pil_mode))
-    
+
     # Save as WebP animation
     if composite_frames:
         # Change extension to .webp
         webp_path = gif_path.replace('.gif', '.webp')
-        
+
         # Save as animated WebP with fast encoding
         composite_frames[0].save(
             webp_path,
