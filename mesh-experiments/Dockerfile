@@ -26,7 +26,7 @@ RUN pip3 install fvcore iopath
 RUN git clone https://github.com/NVIDIA/cub.git /opt/cub
 ENV CUB_HOME=/opt/cub
 ENV FORCE_CUDA=1
-ENV TORCH_CUDA_ARCH_LIST="7.5"
+ENV TORCH_CUDA_ARCH_LIST="6.1;7.5;8.0;8.6;8.9"
 
 RUN pip3 install "git+https://github.com/facebookresearch/pytorch3d.git@stable"
 
@@ -41,7 +41,8 @@ RUN pip3 install \
        pygltflib \
        imageio \
        lpips \
-       piq
+       piq \
+       torch_geometric
 
 RUN wget https://damassets.autodesk.net/content/dam/autodesk/www/files/fbx202037_fbxsdk_gcc_linux.tar.gz -O /tmp/FBXSDK_linux.tgz
 RUN mkdir -p /opt/fbxsdk && \

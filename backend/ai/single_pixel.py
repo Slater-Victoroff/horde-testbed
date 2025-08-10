@@ -1,9 +1,11 @@
 import os
+import time
 import json
 from datetime import datetime
 import time
 
 import torch
+import torch.profiler as profiler
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -25,13 +27,10 @@ LATENT_IMAGE_CHANNELS = 4 # RGBA
 class VFXNet(nn.Module):
     def __init__(self, height, width, decoder_config=None, device='cuda', experiment_name=None, freeze_decoder=False):
         super().__init__()
+        self.device = device
         self.experiment_name = experiment_name
         self.height = height
         self.width = width
-        print(f"VFXNet: height={height}, width={width}")
-        _x_coords = torch.arange(width).repeat(height, 1).view(-1, 1) / width
-        _y_coords = torch.arange(height).repeat(width, 1).t().contiguous().view(-1, 1) / height
-        self.raw_pos = torch.cat([_x_coords, _y_coords], dim=1)
 
         self.decoder = VFXSpiralNetDecoder(**decoder_config or {})
         if self.decoder.latent_dim > 0:
@@ -41,7 +40,6 @@ class VFXNet(nn.Module):
         if self.freeze_decoder:
             for param in self.decoder.parameters():
                 param.requires_grad = False
-        self.raw_pos = self.raw_pos.to(device)
         self._initialize_weights()
 
     def _initialize_weights(self):
@@ -59,18 +57,32 @@ class VFXNet(nn.Module):
             out = self.decoder(raw_pos, control[:, 0:1])
             return out
     
-    def full_image(self, control):
-        # Expand control to match the first dimension of self.raw_pos
-        t = control[:, 0:1]
-        expanded_time = t.unsqueeze(1).expand(-1, self.raw_pos.size(0), -1).reshape(-1, t.size(-1))
+    def run_patch(self, pos_patch, time_patch):
+        flat_raw_pos = pos_patch.view(-1, pos_patch.shape[-1])
+        flat_control = time_patch.view(-1, time_patch.shape[-1])
+
+        if self.decoder.latent_dim > 0:
+            raise NotImplementedError("Latent images not supported in run_patch")
+        else:
+            return self.decoder(flat_raw_pos, flat_control).view(*pos_patch.shape[:-1], self.output_channels)
+
+    def full_image(self, time, H=512, W=512):
+        x_coords = torch.linspace(0, 1, W, device=self.device)
+        y_coords = torch.linspace(0, 1, H, device=self.device)
+        grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing='ij')
+        raw_pos = torch.stack([grid_x, grid_y], dim=-1)
+        expanded_time = time.repeat(H, W, 1)
+
         if self.decoder.latent_dim > 0:
             print("Again, the world has ended.")
             latent = self.latents(control[:, 1].long())
-            latent = latent.view(-1, self.height, self.width, LATENT_IMAGE_CHANNELS)
-            response = self.decoder(self.raw_pos, expanded_time, latent)
+            latent = latent.view(-1, H, W, LATENT_IMAGE_CHANNELS)
+            response = self.decoder(raw_pos, expanded_time, latent)
         else:
-            response = self.decoder(self.raw_pos, expanded_time)
-        shaped_image = response.view(self.height, self.width, self.output_channels)
+            flat_pos = raw_pos.view(-1, 2)
+            flat_time = expanded_time.view(-1, 1)
+            response = self.decoder(flat_pos, flat_time)
+        shaped_image = response.view(H, W, self.output_channels)
         return shaped_image
 
 
@@ -239,10 +251,54 @@ def compute_gradient_scores(
     return grad_scores
 
 
-def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8196, experiment_name=None, decoder_config=None):
-    # Load images and create tensors
-    image_tensor, raw_pos, control_tensor, shape = load_images(image_dir, device)
-    print(f"image_tensor shape: {image_tensor.shape}")
+def subsample_random_pixels(num_samples, image_tensor, raw_pos, control_tensor):
+    total_pixels = image_tensor.shape[0]
+    indices = torch.randperm(total_pixels)[:num_samples]
+    return (
+        image_tensor[indices],
+        raw_pos[indices],
+        control_tensor[indices],
+    )
+
+
+class PatchSampler(torch.utils.data.IterableDataset):
+    def __init__(self, image_tensor, tile_size=32, batch_size=8, dtype=torch.float32, device='cuda'):
+        self.device = device
+        self.tile_size = tile_size
+        self.margin_size = self.tile_size // 2
+        self.image_tensor = image_tensor.permute(0, 3, 1, 2)  # Change to NCHW format
+        self.T, self.C, self.H, self.W = self.image_tensor.shape
+        
+        dx = self.margin_size / self.W
+        dy = self.margin_size / self.H
+        self.kernel_x = torch.linspace(-dx, dx, tile_size, dtype=image_tensor.dtype, device=device)
+        self.kernel_y = torch.linspace(-dy, dy, tile_size, dtype=image_tensor.dtype, device=device)
+
+        self.patch_kernel = torch.stack(torch.meshgrid(self.kernel_y, self.kernel_x, indexing='ij'), dim=-1)  # (tile_size, tile_size, 2)
+        self.batch_size = batch_size
+        self.dtype = dtype
+
+    def __iter__(self):
+        while True:
+            times = torch.randint(0, self.T, (self.batch_size,), device=self.image_tensor.device)
+            image_batch = self.image_tensor[times].to(device=self.device)  # Move to GPU
+            patch_centers = torch.rand((self.batch_size, 2), dtype=self.image_tensor.dtype, device=self.device) * 2 - 1
+            patch_grid = self.patch_kernel.unsqueeze(0) + patch_centers[:, None, None, :]  # [B, tile, tile, 2]
+            
+            patch_batch = F.grid_sample(image_batch, patch_grid).requires_grad_(True)  # [B, C, tile, tile]
+            patch_grid = (patch_grid + 1) / 2
+
+            times_patch = times.float().view(-1, 1, 1, 1).expand(-1, self.tile_size, self.tile_size, 1)
+            yield (
+                patch_batch.to(dtype=self.dtype, device=self.device),
+                patch_grid.to(dtype=self.dtype, device=self.device),
+                (times_patch / self.T).to(dtype=self.dtype, device=self.device)
+            )
+
+
+def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, experiment_name=None, decoder_config=None):
+    image_tensor = load_images(image_dir)
+    shape = image_tensor.shape[1:]
     mse_loss = nn.MSELoss().to(device)
     dct_loss = DCTLoss().to(device)
     gradient_loss = GradientLoss().to(device)
@@ -255,14 +311,9 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8196, expe
     writer = SummaryWriter(log_dir)
     global_step = 0
 
-    # Create a dataset and dataloader
-    dataset = TensorDataset(image_tensor, raw_pos, control_tensor)
-
-    num_sequences = int(control_tensor[:, 1].max().item()) + 1
-    print(f"num_sequences: {num_sequences}")
     model = VFXNet(shape[0], shape[1], decoder_config=decoder_config).to(device)
-    model.experiment_name = experiment_name
-    # optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    model.experiment_name = experiment_name or datetime.now().strftime("%Y%m%d_%H%M%S")
+
     optimizer = SOAP(
         model.parameters(),
         weight_decay=0,
@@ -273,52 +324,47 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8196, expe
     writer.add_text('Model/Config', json.dumps(decoder_config or {}, indent=2), 0)
     writer.add_scalar('Hyperparameters/batch_size', batch_size, 0)
     writer.add_scalar('Hyperparameters/epochs', epochs, 0)
-    train_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4)
     print(f"Train_dataloader_stats: {len(train_dataloader)} batches, {len(train_dataloader.dataset)} samples")
 
     # scheduler = CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-5)
 
-    base_path = f"png_tests/{model.experiment_name}"
+    base_path = f"anim_tests/{model.experiment_name}"
     os.makedirs(os.path.dirname(base_path), exist_ok=True)
 
+    dataset = PatchSampler(image_tensor, batch_size=64)
+    dataloader = DataLoader(dataset, batch_size=None)
     log_epochs = list(range(0, 11, 1)) + list(range(10, 51, 5)) + list(range(50, 101, 10)) + list(range(100, 501, 50)) + list(range(500, 1001, 100))
 
+    batches_per_epoch = 1000
+    total_pixel_loss = 0.0
+    total_patch_loss = 0.0
     for epoch in range(epochs):
-        print(f"Epoch {epoch}/{epochs}")
         model.train()
-        epoch_losses = []
         batch_num = 0
+        total_pixel_loss = 0.0
+        epoch_losses = []
         epoch_start_time = time.time()
-        for image, raw_pos, control in train_dataloader:
+        for image_patches, pos_patches, time_patches in dataloader:
             batch_num += 1
             global_step += 1
             
             if batch_num % 100 == 0:
-                print(f"Batch {batch_num}/{len(train_dataloader)}")
+                print(f"Batch {batch_num}/{len(dataloader)}")
                 examples_per_sec = batch_num * batch_size / (time.time() - epoch_start_time)
                 print(f"Examples per second: {examples_per_sec:.2f}")
                 writer.add_scalar('Training/examples_per_second', examples_per_sec, global_step)
-            
-            # Move batch data to device
-            image = image.to(device)
-            raw_pos = raw_pos.to(device) 
-            control = control.to(device)
-            
-            reconstructed_image = model.forward(raw_pos, control)
+            # Permute reconstructed_image from [B, H, W, C] to [B, C, H, W] and select first 3 channels
+            reconstructed_image = model.run_patch(pos_patches, time_patches)[..., :3]
+            reconstructed_image_patches = reconstructed_image.permute(0, 3, 1, 2)
+            patch_loss = ssim_loss(reconstructed_image_patches, image_patches)
 
-            mse_weight = 0.1
-            dct_weight = 0.15
-            l1_weight = 0.75
-
-            # Calculate individual losses
-            mse_loss_val = mse_loss(reconstructed_image, image)
-            dct_loss_val = dct_loss(reconstructed_image, image)
-            l1_loss_val = F.l1_loss(reconstructed_image, image)
-            
+            if batch_num % 100 == 0:
+                print(f"Batch {batch_num+1}/{batches_per_epoch}")
+                
             pixel_loss = (
-                mse_weight * mse_loss_val +
-                dct_weight * dct_loss_val +
-                l1_weight * l1_loss_val
+                0.1 * mse_loss(reconstructed_image_patches, image_patches) +
+                0.15 * dct_loss(reconstructed_image_patches, image_patches) +
+                0.75 * F.l1_loss(reconstructed_image_patches, image_patches)
             )
             
             # Log losses to TensorBoard
@@ -329,6 +375,7 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8196, expe
             
             epoch_losses.append(pixel_loss.item())
 
+            total_loss = pixel_loss + patch_loss
             optimizer.zero_grad()
             pixel_loss.backward()
             
@@ -360,23 +407,16 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8196, expe
             if ssim_scores:
                 avg_ssim_loss = sum(ssim_scores) / len(ssim_scores)
                 writer.add_scalar('Loss/ssim', avg_ssim_loss, epoch)
+            batch_num += 1
+            if batch_num >= batches_per_epoch:
+                break
 
-        # H, W = model.height, model.width
-        # original_frames = corresponding_original_frames(sampled, image_tensor, (H, W), control_tensor)
-        # compute_gradient_scores(
-        #     reconstructed, original_frames,
-        #     update=True,
-        #     grad_loss_fn=gradient_loss,  # your Sobel‐based function
-        #     optimizer=optimizer
-        # )
-        # scheduler.step()
-
-        # print(f"Epoch [{epoch}/{epochs}], Loss: {epoch_loss:.6f}")
-        # Log specific epochs for detailed analysis
         if epoch in log_epochs:
             epoch_dir = f"{base_path}/epoch_{epoch}"
             os.makedirs(epoch_dir, exist_ok=True)
-            model.eval()  # Set model to evaluation mode
+            model.eval()
+      
+            print(f"Epoch {epoch+1} - Pixel loss: {total_pixel_loss:.4f}, Patch loss: {total_patch_loss:.4f}")
             reconstructed_batch, sampled_controls = save_images(model, control_tensor, base_dir=epoch_dir)
             
             # Get original frames once
@@ -436,6 +476,9 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8196, expe
                     "psnr_per_frame": psnr_scores,
                     "decoder_config": decoder_config
                 }, f, indent=2)
+                
+            with torch.no_grad():
+                save_images(model, H=512, W=1024, n_images=5, gif_frames=250, base_dir=epoch_dir)
     
     # Close TensorBoard writer
     writer.close()

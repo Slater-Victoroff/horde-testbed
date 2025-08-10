@@ -32,7 +32,7 @@ venv/
 *.profile
 
 # Ignore specific local folders
-static/
+static/*
 backend/ai/debug_outputs/
 backend/ai/experiment_data/
 backend/ai/final_data/
