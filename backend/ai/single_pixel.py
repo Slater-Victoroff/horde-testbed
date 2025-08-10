@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from torch.utils.data import DataLoader, TensorDataset
-from piq import ssim, SSIMLoss
+from piq import ssim, SSIMLoss, psnr
 
 from decoders import VFXSpiralNetDecoder, VFXNetPixelDecoder
 from losses import DCTLoss, GradientLoss
@@ -73,19 +73,98 @@ class VFXNet(nn.Module):
         return shaped_image
 
 
+def corresponding_original_frames(sampled_controls, image_tensor, shape, control_tensor):
+    """
+    Extract original frames that correspond to the sampled control values.
+    
+    Args:
+        sampled_controls: List of control tensors with time values
+        image_tensor: Full tensor of all image data
+        shape: Tuple of (H, W)
+        control_tensor: Full control tensor
+    
+    Returns:
+        List of original frames matching the sampled controls
+    """
+    H, W = shape
+    pixels_per_frame = H * W
+    T = control_tensor.shape[0] // pixels_per_frame
+    original_frames = []
+    
+    for control in sampled_controls:
+        t = control[0].item()
+        frame_idx = min(int(t * (T - 1)), T - 1)
+        start = frame_idx * pixels_per_frame
+        end = start + pixels_per_frame
+        gt_frame = image_tensor[start:end].view(H, W, -1)
+        original_frames.append(gt_frame)
+    
+    return original_frames
+
+
+def compute_psnr_scores(reconstructed_frames, original_frames):
+    """
+    Compute PSNR scores between reconstructed frames and original frames.
+    
+    Args:
+        reconstructed_frames: List of reconstructed frames (H, W, C) tensors
+        original_frames: List of original frames (H, W, C) tensors
+    
+    Returns:
+        List of PSNR values in dB
+    """
+    psnr_scores = []
+    
+    with torch.no_grad():
+        for recon, orig in zip(reconstructed_frames, original_frames):
+            # Convert to NCHW format for piq.psnr
+            recon_img = recon.permute(2, 0, 1).unsqueeze(0)
+            orig_img = orig.permute(2, 0, 1).unsqueeze(0)
+            
+            # Compute PSNR
+            psnr_value = psnr(recon_img, orig_img, data_range=1.0)
+            psnr_scores.append(psnr_value.item())
+    
+    return psnr_scores
+
+
+def log_psnr_info(psnr_scores, sampled_controls, epoch):
+    """
+    Log PSNR statistics including min, max, and average values with corresponding frame info.
+    
+    Args:
+        psnr_scores: List of PSNR values
+        sampled_controls: List of control tensors corresponding to each PSNR score
+        epoch: Current epoch number
+        
+    Returns:
+        avg_psnr: Average PSNR value
+    """
+    avg_psnr = sum(psnr_scores) / len(psnr_scores)
+    min_psnr = min(psnr_scores)
+    max_psnr = max(psnr_scores)
+    min_idx = psnr_scores.index(min_psnr)
+    max_idx = psnr_scores.index(max_psnr)
+    
+    # Get corresponding control values for min/max frames
+    min_control = sampled_controls[min_idx]
+    max_control = sampled_controls[max_idx]
+    min_t = min_control[0].item()
+    max_t = max_control[0].item()
+    
+    print(f"Average PSNR for epoch {epoch}: {avg_psnr:.2f} dB")
+    print(f"PSNR stats: min={min_psnr:.2f}dB (t={min_t:.3f}, frame_idx={min_idx}), max={max_psnr:.2f}dB (t={max_t:.3f}, frame_idx={max_idx})")
+    
+    return avg_psnr
+
+
 def compute_ssim_scores(
     reconstructed_batch,
-    sampled_controls,
-    image_tensor,
-    shape,
-    control_tensor, 
+    original_frames,
     update=False,
     ssim_loss_fn=None,
     optimizer=None
 ):
-    H, W = shape
-    pixels_per_frame = H * W
-    T = control_tensor.shape[0] // pixels_per_frame
     ssim_scores = []
 
     if not update:
@@ -94,16 +173,9 @@ def compute_ssim_scores(
         assert ssim_loss_fn is not None, "Must provide SSIM loss function when update=True"
         torch.set_grad_enabled(True)
 
-    for recon, control in zip(reconstructed_batch, sampled_controls):
-        t = control[0].item()
-        frame_idx = min(int(t * (T - 1)), T - 1)
-
-        start = frame_idx * pixels_per_frame
-        end = start + pixels_per_frame
-        gt_frame = image_tensor[start:end].view(H, W, -1)
-
+    for recon, orig in zip(reconstructed_batch, original_frames):
         recon_img = recon.permute(2, 0, 1).unsqueeze(0).detach()
-        gt_img = gt_frame.permute(2, 0, 1).unsqueeze(0).detach()
+        gt_img = orig.permute(2, 0, 1).unsqueeze(0).detach()
 
         if update:
             recon_img.requires_grad_(True)
@@ -124,10 +196,7 @@ def compute_ssim_scores(
 
 def compute_gradient_scores(
     reconstructed_batch,
-    sampled_controls,
-    image_tensor,
-    shape,
-    control_tensor,
+    original_frames,
     update=False,
     grad_loss_fn=None,
     optimizer=None
@@ -137,9 +206,6 @@ def compute_gradient_scores(
     Returns a list of per-frame grad losses; if update=True, does one
     backward()/step() on the mean grad loss.
     """
-    H, W = shape
-    pixels = H * W
-    T = control_tensor.shape[0] // pixels
 
     if update:
         assert grad_loss_fn is not None, "Need grad_loss_fn when update=True"
@@ -151,12 +217,7 @@ def compute_gradient_scores(
     total_grad = 0.0
     grad_scores = []
 
-    for recon, control in zip(reconstructed_batch, sampled_controls):
-        # pick matching GT frame
-        t = control[0].item()
-        idx = min(int(t * (T - 1)), T - 1)
-        start = idx * pixels
-        gt = image_tensor[start:start+pixels].view(H, W, -1)
+    for recon, gt in zip(reconstructed_batch, original_frames):
 
         # NCHW tensors
         p = recon.permute(2, 0, 1).unsqueeze(0)
@@ -243,8 +304,10 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8196, expe
         
         reconstructed, sampled = save_images(model, control_tensor, write_files=False)
         if epoch > 100:
+            H, W = model.height, model.width
+            original_frames = corresponding_original_frames(sampled, image_tensor, (H, W), control_tensor)
             compute_ssim_scores(
-                reconstructed, sampled, image_tensor, (model.height, model.width), control_tensor,
+                reconstructed, original_frames,
                 update=True, ssim_loss_fn=ssim_loss, optimizer=optimizer
             )
         # print(f"Frame loss: {frame_loss.item()}")
@@ -254,10 +317,10 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8196, expe
         # total_loss.backward()
         # optimizer.step()
 
+        # H, W = model.height, model.width
+        # original_frames = corresponding_original_frames(sampled, image_tensor, (H, W), control_tensor)
         # compute_gradient_scores(
-        #     reconstructed, sampled,
-        #     image_tensor, (model.height, model.width),
-        #     control_tensor,
+        #     reconstructed, original_frames,
         #     update=True,
         #     grad_loss_fn=gradient_loss,  # your Sobel‐based function
         #     optimizer=optimizer
@@ -271,25 +334,21 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8196, expe
             os.makedirs(epoch_dir, exist_ok=True)
             model.eval()  # Set model to evaluation mode
             reconstructed_batch, sampled_controls = save_images(model, control_tensor, base_dir=epoch_dir)
-            ssim_scores = compute_ssim_scores(reconstructed_batch, sampled_controls, image_tensor, (model.height, model.width), control_tensor, ssim_loss_fn=ssim_loss, update=False)
+            
+            # Get original frames once
+            H, W = shape[0], shape[1]
+            original_frames_tensors = corresponding_original_frames(sampled_controls, image_tensor, (H, W), control_tensor)
+            
+            # Compute SSIM scores
+            ssim_scores = compute_ssim_scores(reconstructed_batch, original_frames_tensors, ssim_loss_fn=ssim_loss, update=False)
             avg_ssim = sum(ssim_scores) / len(ssim_scores)
+            
+            # Compute PSNR scores
+            psnr_scores = compute_psnr_scores(reconstructed_batch, original_frames_tensors)
+            avg_psnr = log_psnr_info(psnr_scores, sampled_controls, epoch)
 
             # Generate comparison GIF
-            # First, collect original frames matching the sampled controls
-            H, W = shape[0], shape[1]
-            pixels_per_frame = H * W
-            T = control_tensor.shape[0] // pixels_per_frame
-            original_frames = []
-            
-            for control in sampled_controls:
-                t = control[0].item()
-                frame_idx = min(int(t * (T - 1)), T - 1)
-                start = frame_idx * pixels_per_frame
-                end = start + pixels_per_frame
-                gt_frame = image_tensor[start:end].view(H, W, -1).cpu().numpy()
-                original_frames.append(gt_frame)
-            
-            # Convert reconstructed batch to list format for comparison
+            original_frames = [frame.cpu().numpy() for frame in original_frames_tensors]
             control_frames = [frame.squeeze(0).cpu().numpy() for frame in reconstructed_batch]
             
             # Generate the comparison WebP
@@ -304,7 +363,9 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8196, expe
                     "epoch": epoch,
                     # "loss": pixel_loss.item(),
                     "avg_ssim": avg_ssim,
+                    "avg_psnr": avg_psnr,
                     "ssim_per_frame": ssim_scores,
+                    "psnr_per_frame": psnr_scores,
                     "decoder_config": decoder_config
                 }, f, indent=2)
 
