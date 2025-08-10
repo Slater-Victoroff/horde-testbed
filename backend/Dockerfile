@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y \
     libegl1-mesa-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install fastapi uvicorn numpy torch torchvision pillow scikit-image moderngl OpenEXR piq pandas torch_dct
+RUN pip install fastapi uvicorn numpy torch torchvision pillow scikit-image moderngl OpenEXR piq pandas torch_dct tensorboard
 
 EXPOSE 8000
 
