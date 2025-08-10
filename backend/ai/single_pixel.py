@@ -64,7 +64,11 @@ class VFXNet(nn.Module):
         if self.decoder.latent_dim > 0:
             raise NotImplementedError("Latent images not supported in run_patch")
         else:
-            return self.decoder(flat_raw_pos, flat_control).view(*pos_patch.shape[:-1], self.output_channels)
+            # B, C, H, W
+            shape = [pos_patch.shape[0], self.output_channels, *pos_patch.shape[1:-1]]
+            decoded =  self.decoder(flat_raw_pos, flat_control)
+            output =decoded.view(shape)
+            return output
 
     def full_image(self, time, H=512, W=512):
         x_coords = torch.linspace(0, 1, W, device=self.device)
@@ -109,10 +113,10 @@ def corresponding_original_frames(sampled_controls, image_tensor):
         frame_idx = min(int(t * (T - 1)), T - 1)
         start = frame_idx * pixels_per_frame
         end = start + pixels_per_frame
-        gt_frame = image_tensor[start:end].view(H, W, -1)
+        gt_frame = image_tensor[frame_idx,...]
         original_frames.append(gt_frame)
 
-    return original_frames
+    return torch.stack(original_frames).permute(0, 3, 1, 2)
 
 
 def compute_psnr_scores(reconstructed_frames, original_frames):
@@ -162,8 +166,8 @@ def log_psnr_info(psnr_scores, sampled_controls, epoch):
     # Get corresponding control values for min/max frames
     min_control = sampled_controls[min_idx]
     max_control = sampled_controls[max_idx]
-    min_t = min_control[0].item()
-    max_t = max_control[0].item()
+    min_t = min_control.item()
+    max_t = max_control.item()
 
     print(f"Average PSNR for epoch {epoch}: {avg_psnr:.2f} dB")
     print(f"PSNR stats: min={min_psnr:.2f}dB (t={min_t:.3f}, frame_idx={min_idx}), max={max_psnr:.2f}dB (t={max_t:.3f}, frame_idx={max_idx})")
@@ -174,83 +178,19 @@ def log_psnr_info(psnr_scores, sampled_controls, epoch):
 def compute_ssim_scores(
     reconstructed_batch,
     original_frames,
-    update=False,
     ssim_loss_fn=None,
     optimizer=None
 ):
-    ssim_scores = []
 
-    if not update:
-        torch.set_grad_enabled(False)  # Ensure gradients off for pure evaluation
-    else:
-        assert ssim_loss_fn is not None, "Must provide SSIM loss function when update=True"
-        torch.set_grad_enabled(True)
+    torch.set_grad_enabled(False)  # Ensure gradients off for pure evaluation
 
-    for recon, orig in zip(reconstructed_batch, original_frames):
-        recon_img = recon.unsqueeze(0)
-        gt_img = orig.permute(2, 0, 1).unsqueeze(0).detach()
-
-        print(recon_img.shape, gt_img.shape)
-        if update:
-            recon_img.requires_grad_(True)
-            gt_img.requires_grad_(True)
-            loss = ssim_loss_fn(recon_img, gt_img)
-            print(f"SSIM Loss: {loss.item()}")
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            ssim_scores.append(loss.item())
-        else:
-            score = 1 - ssim_loss_fn(recon_img, gt_img).item()
-            ssim_scores.append(score)
+    score = 1 - ssim_loss_fn(
+        reconstructed_batch,
+        original_frames
+    )
 
     torch.set_grad_enabled(True)  # reset default
-    return ssim_scores
-
-
-def compute_gradient_scores(
-    reconstructed_batch,
-    original_frames,
-    update=False,
-    grad_loss_fn=None,
-    optimizer=None
-):
-    """
-    Same API as compute_ssim_scores but runs your gradient loss.
-    Returns a list of per-frame grad losses; if update=True, does one
-    backward()/step() on the mean grad loss.
-    """
-
-    if update:
-        assert grad_loss_fn is not None, "Need grad_loss_fn when update=True"
-        assert optimizer     is not None, "Need optimizer when update=True"
-        torch.set_grad_enabled(True)
-    else:
-        torch.set_grad_enabled(False)
-
-    total_grad = 0.0
-    grad_scores = []
-
-    for recon, gt in zip(reconstructed_batch, original_frames):
-
-        # NCHW tensors
-        p = recon.permute(2, 0, 1).unsqueeze(0)
-        g = gt.permute(2, 0, 1).unsqueeze(0).detach()
-
-        loss_g = grad_loss_fn(p, g)
-        grad_scores.append(loss_g.item())
-        if update:
-            total_grad += loss_g
-
-    if update:
-        mean_grad = total_grad / len(reconstructed_batch)
-        optimizer.zero_grad()
-        mean_grad.backward()
-        optimizer.step()
-
-    torch.set_grad_enabled(True)
-    return grad_scores
-
+    return score
 
 def subsample_random_pixels(num_samples, image_tensor, raw_pos, control_tensor):
     total_pixels = image_tensor.shape[0]
@@ -299,6 +239,7 @@ class PatchSampler(torch.utils.data.IterableDataset):
 
 def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, experiment_name=None, decoder_config=None):
     image_tensor = load_images(image_dir)
+    T, H, W, C = image_tensor.shape
     shape = image_tensor.shape[1:]
     mse_loss = nn.MSELoss().to(device)
     dct_loss = DCTLoss().to(device)
@@ -357,8 +298,8 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
                 print(f"Examples per second: {examples_per_sec:.2f}")
                 writer.add_scalar('Training/examples_per_second', examples_per_sec, global_step)
             # Permute reconstructed_image from [B, H, W, C] to [B, C, H, W] and select first 3 channels
-            reconstructed_image = model.run_patch(pos_patches, time_patches)[..., :3]
-            reconstructed_image_patches = reconstructed_image.permute(0, 3, 1, 2)
+            reconstructed_image = model.run_patch(pos_patches, time_patches)[:,:3,...]
+            reconstructed_image_patches = reconstructed_image
             patch_loss = ssim_loss(reconstructed_image_patches, image_patches)
 
             mse_loss_val = mse_loss(reconstructed_image_patches, image_patches)
@@ -398,34 +339,20 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
         writer.add_scalar('Loss/epoch_average', avg_epoch_loss, epoch)
         writer.add_scalar('Training/epoch_duration', epoch_duration, epoch)
 
-        # TODO: probably don't always want to save out at full resolution
-        reconstructed, sampled = save_images(model, H=image_tensor.shape[1], W=image_tensor.shape[2], write_files=False)
-        if epoch > 100:
-            original_frames = corresponding_original_frames(sampled, image_tensor)
-            ssim_scores = compute_ssim_scores(
-                reconstructed, original_frames,
-                update=True, ssim_loss_fn=ssim_loss, optimizer=optimizer
-            )
-            # Log SSIM scores from the update
-            if ssim_scores:
-                avg_ssim_loss = sum(ssim_scores) / len(ssim_scores)
-                writer.add_scalar('Loss/ssim', avg_ssim_loss, epoch)
-            batch_num += 1
-
         if epoch in log_epochs:
             epoch_dir = f"{base_path}/epoch_{epoch}"
             os.makedirs(epoch_dir, exist_ok=True)
             model.eval()
 
             print(f"Epoch {epoch+1} - Pixel loss: {total_pixel_loss:.4f}, Patch loss: {total_patch_loss:.4f}")
-            reconstructed_batch, sampled_controls = save_images(model, base_dir=epoch_dir)
+            reconstructed_batch, sampled_controls = save_images(model, H=H, W=W, write_files=True, base_dir=epoch_dir)
+            reconstructed_batch = reconstructed_batch[:,:3,:,:]
 
             # Get original frames once
-            original_frames_tensors = corresponding_original_frames(sampled_controls, image_tensor)
+            original_frames_tensors = corresponding_original_frames(sampled_controls, image_tensor).to(dtype=torch.float32)
 
             # Compute SSIM scores
-            ssim_scores = compute_ssim_scores(reconstructed_batch, original_frames_tensors, ssim_loss_fn=ssim_loss, update=False)
-            avg_ssim = sum(ssim_scores) / len(ssim_scores)
+            avg_ssim = compute_ssim_scores(reconstructed_batch, original_frames_tensors, ssim_loss_fn=ssim_loss)
 
             # Compute PSNR scores
             psnr_scores = compute_psnr_scores(reconstructed_batch, original_frames_tensors)
@@ -437,22 +364,17 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
 
             # Log per-frame metrics as histograms
             writer.add_histogram('Metrics/PSNR_distribution', torch.tensor(psnr_scores), epoch)
-            writer.add_histogram('Metrics/SSIM_distribution', torch.tensor(ssim_scores), epoch)
 
             # Log sample images to TensorBoard
             if len(reconstructed_batch) > 0 and len(original_frames_tensors) > 0:
                 # Take first 4 frames for visualization
                 num_samples = min(4, len(reconstructed_batch))
                 for i in range(num_samples):
-                    # Convert from HWC to CHW for TensorBoard
-                    recon_img = reconstructed_batch[i].permute(2, 0, 1)
-                    orig_img = original_frames_tensors[i].permute(2, 0, 1)
-
-                    writer.add_image(f'Reconstructed/frame_{i}', recon_img, epoch)
-                    writer.add_image(f'Original/frame_{i}', orig_img, epoch)
+                    writer.add_image(f'Reconstructed/frame_{i}', reconstructed_batch[i], epoch)
+                    writer.add_image(f'Original/frame_{i}', original_frames_tensors[i], epoch)
 
                     # Add difference image
-                    diff_img = torch.abs(recon_img - orig_img)
+                    diff_img = torch.abs(reconstructed_batch[i] - original_frames_tensors[i])
                     writer.add_image(f'Difference/frame_{i}', diff_img, epoch)
 
             # Generate comparison GIF
@@ -464,21 +386,6 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
             generate_comparison_gif(original_frames, control_frames, comparison_path)
 
             print(f"Average SSIM for epoch {epoch}: {avg_ssim:.4f}")
-            metrics_path = f"png_tests/{model.experiment_name}/epoch_{epoch}/summary.json"
-            os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
-            with open(metrics_path, "w") as f:
-                json.dump({
-                    "epoch": epoch,
-                    # "loss": pixel_loss.item(),
-                    "avg_ssim": avg_ssim,
-                    "avg_psnr": avg_psnr,
-                    "ssim_per_frame": ssim_scores,
-                    "psnr_per_frame": psnr_scores,
-                    "decoder_config": decoder_config
-                }, f, indent=2)
-
-            with torch.no_grad():
-                save_images(model, H=512, W=1024, n_images=5, gif_frames=250, base_dir=epoch_dir)
 
     # Close TensorBoard writer
     writer.close()

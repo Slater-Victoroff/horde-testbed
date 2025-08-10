@@ -94,6 +94,7 @@ def load_images(image_dir, input_image_channels=4, control_channels=2, norm=True
     return normalized_frames
 
 def save_images(model, H=256, W=256, n_images=5, gif_frames=20, base_dir=None, write_files=True):
+    print(f"Saving images at {H} x {W} resolution")
     reconstructured_images = []
     with torch.no_grad():
         times = torch.rand(n_images, device=model.device)
@@ -116,7 +117,7 @@ def save_images(model, H=256, W=256, n_images=5, gif_frames=20, base_dir=None, w
             gif_path = os.path.join(base_dir, "control_animation.webp")
 
         generate_control_animation(model, H=H, W=W, num_frames=gif_frames, gif_path=gif_path, write_files=write_files)
-    return reconstructured_images, times
+    return torch.stack(reconstructured_images), times
 
 def generate_control_animation(model, H, W, num_frames=20, gif_path=None, write_files=True):
     time_control = torch.linspace(0, 1, num_frames, device=model.device).unsqueeze(1)  # [num_frames, 1]
