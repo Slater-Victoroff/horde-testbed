@@ -143,16 +143,39 @@ EXPERIMENTS = []
 #     }
 # ]
 
+# EXPERIMENTS += [
+#     {
+#         "name": "TestRun",
+#         "dataset": "VFX/firething",
+#         "config": {
+#             "latent_dim": 0,
+#             "trunk_pos_channels": 2,
+#             "trunk_time_channels": 1,
+#             "film_pos_channels": 64,
+#             "film_time_channels": 8,
+#             "film_pos_scheme": "sinusoidal",
+#             "film_time_scheme": "sinusoidal",
+#             "film_pos_include_raw": True,
+#             "film_time_include_raw": True,
+#             "prefilm_dims": 32,
+#             "hidden_dim": 64,
+#             "apply_film": [1],
+#             "output_channels": 3,
+#             "learned_encodings": True,
+#         }
+#     }
+# ]
+
 EXPERIMENTS += [
     {
-        "name": "Benchmark1",
-        "dataset": "vid_compression/beauty",
+        "name": "TestSirenNoLearn",
+        "dataset": "VFX/firething",
         "config": {
             "latent_dim": 0,
             "trunk_pos_channels": 2,
             "trunk_time_channels": 1,
-            "film_pos_channels": 64,
-            "film_time_channels": 8,
+            "film_pos_channels": 2,
+            "film_time_channels": 1,
             "film_pos_scheme": "sinusoidal",
             "film_time_scheme": "sinusoidal",
             "film_pos_include_raw": True,
@@ -160,9 +183,173 @@ EXPERIMENTS += [
             "prefilm_dims": 32,
             "hidden_dim": 64,
             "apply_film": [1],
+            "output_channels": 3,
+            "learned_encodings": True,
+            "siren_film": True,
         }
     }
 ]
+
+# EXPERIMENTS += [
+#     {
+#         "name": "TestSirenNoFilm",
+#         "dataset": "VFX/firething",
+#         "config": {
+#             "latent_dim": 0,
+#             "trunk_pos_channels": 2,
+#             "trunk_time_channels": 1,
+#             "film_pos_channels": 0,
+#             "film_time_channels": 0,
+#             "film_pos_scheme": "sinusoidal",
+#             "film_time_scheme": "sinusoidal",
+#             "film_pos_include_raw": True,
+#             "film_time_include_raw": True,
+#             "prefilm_dims": 0,
+#             "hidden_dim": 64,
+#             "apply_film": [],
+#             "output_channels": 3,
+#             "siren_trunk": True,
+#         }
+#     }
+# ]
+
+# EXPERIMENTS += [
+#     {
+#         "name": "Benchmark1",
+#         "dataset": "benchmarks/uvg/beauty",
+#         "config": {
+#             "latent_dim": 0,
+#             "trunk_pos_channels": 2,
+#             "trunk_time_channels": 1,
+#             "film_pos_channels": 64,
+#             "film_time_channels": 8,
+#             "film_pos_scheme": "sinusoidal",
+#             "film_time_scheme": "sinusoidal",
+#             "film_pos_include_raw": True,
+#             "film_time_include_raw": True,
+#             "prefilm_dims": 32,
+#             "hidden_dim": 64,
+#             "apply_film": [1],
+#         }
+#     }
+# ]
+
+# EXPERIMENTS += [
+#     {
+#         "name": "Big-Benchmark1",
+#         "dataset": "benchmarks/uvg/beauty",
+#         "config": {
+#             "latent_dim": 0,
+#             "trunk_pos_channels": 64,
+#             "trunk_time_channels": 16,
+#             "film_pos_channels": 256,
+#             "film_time_channels": 48,
+#             "film_pos_scheme": "sinusoidal",
+#             "film_time_scheme": "sinusoidal",
+#             "film_pos_include_raw": True,
+#             "film_time_include_raw": True,
+#             "prefilm_dims": 128,
+#             "hidden_dim": 256,
+#             "apply_film": [1],
+#             "output_channels": 3,
+#         }
+#     }
+# ]
+
+
+# EXPERIMENTS += [
+#     {
+#         "name": "Med-Benchmark1",
+#         "dataset": "benchmarks/uvg/beauty",
+#         "config": {
+#             "latent_dim": 0,
+#             "trunk_pos_channels": 64,
+#             "trunk_time_channels": 16,
+#             "film_pos_channels": 256,
+#             "film_time_channels": 48,
+#             "film_pos_scheme": "sinusoidal",
+#             "film_time_scheme": "sinusoidal",
+#             "film_pos_include_raw": True,
+#             "film_time_include_raw": True,
+#             "prefilm_dims": 128,
+#             "hidden_dim": 256,
+#             "apply_film": [1],
+#             "output_channels": 3,
+#         }
+#     }
+# ]
+
+# EXPERIMENTS += [
+#     {
+#         "name": "LearnedEncoding-Benchmark1",
+#         "dataset": "benchmarks/uvg/beauty",
+#         "config": {
+#             "latent_dim": 0,
+#             "trunk_pos_channels": 64,
+#             "trunk_time_channels": 16,
+#             "film_pos_channels": 512,
+#             "film_time_channels": 64,
+#             "film_pos_scheme": "sinusoidal",
+#             "film_time_scheme": "sinusoidal",
+#             "film_pos_include_raw": True,
+#             "film_time_include_raw": True,
+#             "prefilm_dims": 128,
+#             "hidden_dim": 256,
+#             "apply_film": [1],
+#             "output_channels": 3,
+#             "learned_encodings": True,
+#         }
+#     }
+# ]
+
+# EXPERIMENTS += [
+#     {
+#         "name": "WideEncoding-Benchmark1",
+#         "dataset": "benchmarks/uvg/beauty",
+#         "config": {
+#             "latent_dim": 0,
+#             "trunk_pos_channels": 2,
+#             "trunk_time_channels": 1,
+#             "film_pos_channels": 1024,
+#             "film_time_channels": 256,
+#             "film_pos_scheme": "sinusoidal",
+#             "film_time_scheme": "sinusoidal",
+#             "film_pos_include_raw": True,
+#             "film_time_include_raw": True,
+#             "prefilm_dims": 256,
+#             "hidden_dim": 128,
+#             "apply_film": [1],
+#             "output_channels": 3,
+#             "learned_encodings": True,
+#         }
+#     }
+# ]
+
+
+# EXPERIMENTS += [
+#     {
+#         "name": "NewEncoding-Benchmark1",
+#         "dataset": "benchmarks/uvg/beauty",
+#         "config": {
+#             "latent_dim": 0,
+#             "trunk_pos_channels": 256,
+#             "trunk_time_channels": 64,
+#             "film_pos_channels": 1024,
+#             "film_time_channels": 256,
+#             "film_pos_scheme": "sinusoidal",
+#             "film_time_scheme": "sinusoidal",
+#             "film_pos_include_raw": True,
+#             "film_time_include_raw": True,
+#             "prefilm_dims": 128,
+#             "hidden_dim": 512,
+#             "apply_film": [1],
+#             "num_layers": 6,
+#             "layer_sizes": [2, 1.5, 1, 0.5, 1, 2],
+#             "output_channels": 3,
+#             "learned_encodings": True,
+#         }
+#     }
+# ]
 
 # EXPERIMENTS += [
 #     {

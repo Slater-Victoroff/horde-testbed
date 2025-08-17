@@ -10,7 +10,8 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from torch.utils.data import DataLoader, TensorDataset
-from piq import ssim, SSIMLoss
+from piq import ssim, SSIMLoss, psnr
+from torch.utils.tensorboard import SummaryWriter
 
 from decoders import VFXSpiralNetDecoder, VFXNetPixelDecoder
 from losses import DCTLoss, GradientLoss
@@ -234,14 +235,14 @@ class PatchSampler(torch.utils.data.IterableDataset):
 
 def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, experiment_name=None, decoder_config=None):
     image_tensor = load_images(image_dir)
-    shape = image_tensor.shape[1:]
+    T, H, W, C = image_tensor.shape
 
     mse_loss = nn.MSELoss().to(device)
     dct_loss = DCTLoss().to(device)
     gradient_loss = GradientLoss().to(device)
     ssim_loss = SSIMLoss(data_range=1.0).to(device)
 
-    model = VFXNet(shape[0], shape[1], decoder_config=decoder_config).to(device)
+    model = VFXNet(H, W, decoder_config=decoder_config).to(device)
     model.experiment_name = experiment_name or datetime.now().strftime("%Y%m%d_%H%M%S")
     optimizer = SOAP(
         model.parameters(),
@@ -255,9 +256,19 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
     dataloader = DataLoader(dataset, batch_size=None)
     log_epochs = list(range(0, 11, 1)) + list(range(10, 51, 5)) + list(range(50, 101, 10)) + list(range(100, 501, 50)) + list(range(500, 1001, 100))
 
+    writer = SummaryWriter(f'runs/{model.experiment_name}')
+    writer.add_text('Config/Decoder', json.dumps(decoder_config or {}, indent=2), 0)
+    writer.add_graph(
+        model,
+        (
+            torch.zeros((7, 2), device=device),
+            torch.zeros((7, 1), device=device),
+        )
+    )
     batches_per_epoch = 1000
     total_pixel_loss = 0.0
     total_patch_loss = 0.0
+    global_step = 0
     for epoch in range(epochs):
         model.train()
         batch_num = 0
@@ -270,16 +281,28 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
 
             if batch_num % 100 == 0:
                 print(f"Batch {batch_num+1}/{batches_per_epoch}")
+            
+            mse_weight, mse_component = 0.1, mse_loss(reconstructed_image_patches, image_patches)
+            dct_weight, dct_component = 0.15, dct_loss(reconstructed_image_patches, image_patches)
+            l1_weight, l1_component = 0.75, F.l1_loss(reconstructed_image_patches, image_patches)
+
             pixel_loss = (
-                0.1 * mse_loss(reconstructed_image_patches, image_patches) +
-                0.15 * dct_loss(reconstructed_image_patches, image_patches) +
-                0.75 * F.l1_loss(reconstructed_image_patches, image_patches)
+                mse_weight * mse_component +
+                dct_weight * dct_component +
+                l1_weight * l1_component
             )
 
             total_loss = pixel_loss + patch_loss
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
+
+            writer.add_scalar('Loss/MSE', mse_component.item(), global_step)
+            writer.add_scalar('Loss/DCT', dct_component.item(), global_step)
+            writer.add_scalar('Loss/L1', l1_component.item(), global_step)
+            writer.add_scalar('Loss/Total', total_loss.item(), global_step)
+            writer.add_scalar('Loss/Pixel', pixel_loss.item(), global_step)
+            writer.add_scalar('Loss/Patch', patch_loss.item(), global_step)
             total_pixel_loss += pixel_loss.item()
             total_patch_loss += patch_loss.item()
             batch_num += 1
@@ -294,18 +317,28 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
             os.makedirs(epoch_dir, exist_ok=True)
             model.eval()  # Set model to evaluation mode
             with torch.no_grad():
-                save_images(model, H=512, W=1024, n_images=5, gif_frames=250, base_dir=epoch_dir)
-                # print(f"Average SSIM for epoch {epoch}: {avg_ssim:.4f}")
-                # metrics_path = f"png_tests/{model.experiment_name}/epoch_{epoch}/summary.json"
-                # os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
-                # with open(metrics_path, "w") as f:
-                #     json.dump({
-                #         "epoch": epoch,
-                #         # "loss": pixel_loss.item(),
-                #         "avg_ssim": avg_ssim,
-                #         "ssim_per_frame": ssim_scores,
-                #         "decoder_config": decoder_config
-                #     }, f, indent=2)
+                debug_frames = 5
+                test_frames = 10
+                save_images(model, H=H, W=W, n_images=debug_frames, gif_frames=T, base_dir=epoch_dir)
+                
+                test_controls = torch.randint(0, T, (test_frames,), device=device)
+                base_batch = image_tensor[test_controls]
+                pred_batch = [model.full_image(test_control / T, H, W) for test_control in test_controls]
+                pred_batch = torch.stack(pred_batch).to(dtype=torch.float32)
+                print(f"Base batch shape: {base_batch.shape}, Pred batch shape: {pred_batch.shape}")
+
+                base_batch_nchw = base_batch.permute(0, 3, 1, 2)
+                pred_batch_nchw = pred_batch.permute(0, 3, 1, 2)
+                comparison = torch.cat([base_batch_nchw, pred_batch_nchw], dim=3)  # Concatenate along width
+
+                ssim_result = ssim(base_batch_nchw, pred_batch_nchw)
+                psnr_result = psnr(base_batch_nchw, pred_batch_nchw)
+
+                for i, t in enumerate(test_controls):
+                    writer.add_image(f'Images/Comparison_t{t}', comparison[i], epoch)
+
+                print(f"SSIM result: {ssim_result.item():.4f}, PSNR result: {psnr_result.item():.4f}")
+        global_step += 1
 
 
 def get_total_grad_norm(model, norm_type=2):

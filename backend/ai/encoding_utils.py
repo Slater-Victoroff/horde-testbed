@@ -30,17 +30,31 @@ def kernel_expand(raw_pos, height, width, kernel_size=3):
     return torch.stack([expanded_x, expanded_y], dim=-1).view(-1, kernel_size ** 2, 2)
 
 
-def compute_spiral_encoding(x, num_harmonics):
+def compute_spiral_encoding(x, target_dim, freqs=None, amps=None):
     out = []
-    for i in range(1, num_harmonics + 1):
-        out += [torch.sin(i * x) / i, torch.cos(i * x) / i]
+    if freqs is None:
+        num_harmonics = (target_dim // 2) + 1
+        freqs = torch.arange(1, num_harmonics + 1, device=x.device).repeat_interleave(2)
+    if amps is None:
+        amps = torch.ones_like(freqs)
+    for i in range(freqs.shape[0]):
+        if i % 2 == 1:
+            out += torch.sin(freqs[i] * x * 2 * np.pi) * amps[i]
+        elif i % 2 == 0:
+            out += torch.cos(freqs[i] * x * 2 * np.pi) * amps[i]
     return torch.cat(out, dim=-1)
 
 
-def compute_sinusoidal_encoding(coords, num_harmonics):
+def compute_sinusoidal_encoding(coords, target_dim, freqs=None):
+    if freqs is None:
+        num_harmonics = (target_dim // 2) + 1
+        freqs = torch.arange(1, num_harmonics + 1, device=coords.device).repeat_interleave(2)
     encodings = []
-    for i in range(1, num_harmonics + 1):
-        encodings += [torch.sin(i * coords), torch.cos(i * coords)]
+    for i in range(freqs.shape[0]):
+        if i % 2 == 1:
+            encodings += [torch.sin(freqs[i] * coords * 2 * np.pi)]
+        elif i % 2 == 0:
+            encodings += [torch.cos(freqs[i] * coords * 2 * np.pi)]
     return torch.cat(encodings, dim=-1)
 
 
@@ -62,7 +76,7 @@ def compute_gaussian_encoding(x, target_dim, std=10.0, seed=42):
     return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
 
 
-def compute_targeted_encodings(x, target_dim, scheme="spiral", norm_2pi=True, include_norm=False, include_raw=False, seed=42):
+def compute_targeted_encodings(x, target_dim, scheme="spiral", norm_2pi=True, include_norm=False, include_raw=False, freqs=None, seed=42):
     _, N = x.shape
     encodings = []
 
@@ -75,12 +89,11 @@ def compute_targeted_encodings(x, target_dim, scheme="spiral", norm_2pi=True, in
             encodings.append(x)
 
     if scheme in ["spiral", "sinusoidal"]:
-        num_harmonics = ((target_dim - (N if include_raw else 0)) // 2) + 1
         encoding_fn = {
             "spiral": compute_spiral_encoding,
             "sinusoidal": compute_sinusoidal_encoding,
         }[scheme]
-        encodings.append(encoding_fn(x, num_harmonics=num_harmonics))
+        encodings.append(encoding_fn(x, target_dim, freqs=freqs))
     elif scheme == "gaussian":
         encodings.append(compute_gaussian_encoding(x, target_dim, seed=seed))
     elif scheme == "linear":
@@ -98,7 +111,7 @@ def compute_targeted_encodings(x, target_dim, scheme="spiral", norm_2pi=True, in
 
 class SineLayer(nn.Module):
     """Siren activation function."""
-    def __init__(self, in_features, out_features, is_first=False, omega=10.0):
+    def __init__(self, in_features, out_features, is_first=False, omega=30.0):
         super().__init__()
         self.omega = omega
         self.is_first = is_first

@@ -27,6 +27,10 @@ class VFXSpiralNetDecoder(nn.Module):
             "hidden_dim": 64,
             "prefilm_dims": 32,
             "apply_film": [1],
+            "num_layers": 4,
+            "learned_encodings": False,
+            "siren_film": False,
+            "siren_trunk": False,
         }
         defaults.update(kwargs)
         for key, value in defaults.items():
@@ -37,16 +41,22 @@ class VFXSpiralNetDecoder(nn.Module):
 
         if self.prefilm_dims > 0:
             if self.film_time_channels > 0:
-                self.time_embed = nn.Sequential(
-                    nn.Linear(self.film_time_channels, self.prefilm_dims),
-                    nn.ReLU(),
-                )
+                if self.siren_film:
+                    self.time_embed = SineLayer(self.film_time_channels, self.prefilm_dims, is_first=True)
+                else:
+                    self.time_embed = nn.Sequential(
+                        nn.Linear(self.film_time_channels, self.prefilm_dims),
+                        nn.ReLU(),
+                    )
 
             if self.film_pos_channels > 0:
-                self.pos_embed = nn.Sequential(
-                    nn.Linear(self.film_pos_channels, self.prefilm_dims),
-                    nn.ReLU(),
-                )
+                if self.siren_film:
+                    self.pos_embed = SineLayer(self.film_pos_channels, self.prefilm_dims, is_first=True)
+                else:
+                    self.pos_embed = nn.Sequential(
+                        nn.Linear(self.film_pos_channels, self.prefilm_dims),
+                        nn.ReLU(),
+                    )
 
             if self.film_time_channels > 0 or self.film_pos_channels > 0:
                 prefilm_input_dim = (self.film_time_channels > 0) * self.prefilm_dims + (self.film_pos_channels > 0) * self.prefilm_dims
@@ -56,16 +66,28 @@ class VFXSpiralNetDecoder(nn.Module):
                 prefilm_input_dim = self.film_time_channels + self.film_pos_channels
                 self.film = nn.Linear(prefilm_input_dim, self.hidden_dim * 2)
 
-        self.layers = nn.ModuleList([
-            nn.Linear(input_dim, self.hidden_dim),
-            nn.GELU(),
-            nn.Linear(self.hidden_dim, self.hidden_dim),
-            nn.GELU(),
-            nn.Linear(self.hidden_dim, self.hidden_dim),
-            nn.GELU(),
-            nn.Linear(self.hidden_dim, self.output_channels),
-            nn.Sigmoid()
-        ])
+        self.layers = nn.ModuleList()
+        if self.siren_trunk:
+            self.layers.append(SineLayer(input_dim, self.hidden_dim, is_first=True))
+        else:
+            self.layers.append(nn.Linear(input_dim, self.hidden_dim))
+        for i in range(1, self.num_layers - 1):
+            if self.siren_trunk:
+                self.layers.append(SineLayer(self.hidden_dim, self.hidden_dim))
+            else:
+                self.layers.append(nn.GELU())
+                self.layers.append(nn.Linear(self.hidden_dim, self.hidden_dim))
+        if not self.siren_trunk:
+            self.layers.append(nn.GELU())
+        self.layers.append(nn.Linear(self.hidden_dim, self.output_channels))
+        self.layers.append(nn.Sigmoid())
+
+        if self.learned_encodings:
+            self.pos_freqs = nn.Parameter(torch.randn(self.film_pos_channels), requires_grad=True)
+            self.time_freqs = nn.Parameter(torch.randn(self.film_time_channels), requires_grad=True)
+        else:
+            self.pos_freqs = None
+            self.time_freqs = None
 
     def forward(self, raw_pos, time, latent=None, return_hidden_layer=None):
         if self.latent_dim > 0:
@@ -114,6 +136,7 @@ class VFXSpiralNetDecoder(nn.Module):
                 include_raw=self.film_pos_include_raw,
                 norm_2pi=True,
                 include_norm=self.film_pos_include_norm,
+                freqs=self.pos_freqs,
             )
             if self.prefilm_dims > 0:
                 film_pos = self.pos_embed(film_pos)
@@ -127,6 +150,7 @@ class VFXSpiralNetDecoder(nn.Module):
                 include_raw=self.film_time_include_raw,
                 norm_2pi=True,
                 include_norm=self.film_time_include_norm,
+                freqs=self.time_freqs,
             )
             if self.prefilm_dims > 0:
                 film_time = self.time_embed(film_time)

@@ -80,7 +80,7 @@ def load_images(image_dir, input_image_channels=4, control_channels=2, norm=True
         for png_file in png_files:
             png_frame = iio.imread(png_file, plugin="pillow")
             png_frames.append(png_frame)
-        frames = np.array(png_frames, dtype=np.float16)
+        frames = np.array(png_frames, dtype=np.float32)
     num_bytes = frames.nbytes
     if num_bytes > 2 * 1024 * 1024 * 1024:
         device = "cpu"
@@ -88,7 +88,7 @@ def load_images(image_dir, input_image_channels=4, control_channels=2, norm=True
     else:
         device = "cuda"
     with torch.no_grad():
-        frames = torch.tensor(frames, dtype=torch.float16, device=device)
+        frames = torch.tensor(frames, dtype=torch.float32, device=device)
         normalized_frames = frames / 255.0
 
     return normalized_frames
