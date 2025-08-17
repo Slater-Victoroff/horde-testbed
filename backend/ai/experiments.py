@@ -143,10 +143,31 @@ EXPERIMENTS = []
 #     }
 # ]
 
+# EXPERIMENTS += [
+#     {
+#         "name": "Benchmark1",
+#         "dataset": "vid_compression/beauty",
+#         "config": {
+#             "latent_dim": 0,
+#             "trunk_pos_channels": 2,
+#             "trunk_time_channels": 1,
+#             "film_pos_channels": 64,
+#             "film_time_channels": 8,
+#             "film_pos_scheme": "sinusoidal",
+#             "film_time_scheme": "sinusoidal",
+#             "film_pos_include_raw": True,
+#             "film_time_include_raw": True,
+#             "prefilm_dims": 32,
+#             "hidden_dim": 64,
+#             "apply_film": [1],
+#         }
+#     }
+# ]
+
 EXPERIMENTS += [
     {
-        "name": "Benchmark1",
-        "dataset": "vid_compression/beauty",
+        "name": "FireCircle",
+        "dataset": "VFX/fire-circle",
         "config": {
             "latent_dim": 0,
             "trunk_pos_channels": 2,

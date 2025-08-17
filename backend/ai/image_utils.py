@@ -51,7 +51,7 @@ def load_exr_image(image_path):
     with OpenEXR.File(str(image_path)) as exr_file:
         if "RGB" in exr_file.channels():
             rgb = exr_file.channels()["RGB"].pixels
-            alpha = np.ones((rgb.shape[0], rgb.shape[1], 1), dtype=np.float16)
+            alpha = np.ones((rgb.shape[0], rgb.shape[1], 1), dtype=np.float32)
             rgba = np.concatenate([rgb, alpha], axis=2)
         elif "RGBA" in exr_file.channels():
             rgba = exr_file.channels()["RGBA"].pixels
@@ -62,7 +62,15 @@ def load_exr_image(image_path):
     return rgba
 
 
-def load_images(image_dir, input_image_channels=4, control_channels=2, norm=True, add_next=False):
+def load_images(image_dir, input_image_channels=4, control_channels=2, norm=True, add_next=False, max_size=None):
+    """
+    Load images from a directory, optionally downsampling to max_size while preserving aspect ratio.
+    
+    Args:
+        image_dir: Path to directory containing images
+        max_size: Optional tuple (max_height, max_width) or single int for max dimension.
+                 If provided, images larger than this will be downsampled preserving aspect ratio.
+    """
     gif_files = [gif for gif in image_dir.glob("**/*.gif") if gif.name != "debug.gif"]
     png_files = [png for png in image_dir.glob("**/*.png") if png.name != "debug.png"]
 
@@ -80,7 +88,45 @@ def load_images(image_dir, input_image_channels=4, control_channels=2, norm=True
         for png_file in png_files:
             png_frame = iio.imread(png_file, plugin="pillow")
             png_frames.append(png_frame)
-        frames = np.array(png_frames, dtype=np.float16)
+        frames = np.array(png_frames, dtype=np.float32)
+    
+    # Apply downsampling if max_size is specified and images are too large
+    if max_size is not None:
+        original_shape = frames.shape
+        H, W = frames.shape[1], frames.shape[2]
+        
+        # Handle both tuple and single int for max_size
+        if isinstance(max_size, (int, float)):
+            max_h = max_w = int(max_size)
+        else:
+            max_h, max_w = max_size
+        
+        # Calculate scaling factor to preserve aspect ratio
+        if H > max_h or W > max_w:
+            scale = min(max_h / H, max_w / W)
+            new_h = int(H * scale)
+            new_w = int(W * scale)
+            
+            print(f"Downsampling images from {H}x{W} to {new_h}x{new_w} (scale: {scale:.3f})")
+            
+            # Convert to torch tensor for interpolation
+            frames_torch = torch.tensor(frames, dtype=torch.float32)
+            if len(frames_torch.shape) == 3:  # Single frame
+                frames_torch = frames_torch.unsqueeze(0)
+            
+            # Reshape for interpolation: (N, H, W, C) -> (N, C, H, W)
+            frames_torch = frames_torch.permute(0, 3, 1, 2)
+            
+            # Downsample using bilinear interpolation
+            import torch.nn.functional as F
+            frames_torch = F.interpolate(frames_torch, size=(new_h, new_w), mode='bilinear', align_corners=False)
+            
+            # Reshape back: (N, C, H, W) -> (N, H, W, C)
+            frames_torch = frames_torch.permute(0, 2, 3, 1)
+            frames = frames_torch.numpy().astype(np.float32)
+            
+            print(f"Resized from {original_shape} to {frames.shape}")
+    
     num_bytes = frames.nbytes
     if num_bytes > 2 * 1024 * 1024 * 1024:
         device = "cpu"
@@ -88,7 +134,7 @@ def load_images(image_dir, input_image_channels=4, control_channels=2, norm=True
     else:
         device = "cuda"
     with torch.no_grad():
-        frames = torch.tensor(frames, dtype=torch.float16, device=device)
+        frames = torch.tensor(frames, dtype=torch.float32, device=device)
         normalized_frames = frames / 255.0
 
     return normalized_frames
