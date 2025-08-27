@@ -223,7 +223,7 @@ class PatchSampler(torch.utils.data.IterableDataset):
             patch_grid = self.patch_kernel.unsqueeze(0) + patch_centers[:, None, None, :]  # [B, tile, tile, 2]
             
             patch_batch = F.grid_sample(image_batch, patch_grid).requires_grad_(True)  # [B, C, tile, tile]
-            patch_grid = (patch_grid + 1) / 2
+            patch_grid = ((patch_grid + 1) / 2).clamp(0.0, 1.0)
 
             times_patch = times.float().view(-1, 1, 1, 1).expand(-1, self.tile_size, self.tile_size, 1)
             yield (
@@ -232,6 +232,69 @@ class PatchSampler(torch.utils.data.IterableDataset):
                 (times_patch / self.T).to(dtype=self.dtype, device=self.device)
             )
 
+
+def _log_vector_dist(writer: SummaryWriter, name: str, vec: torch.Tensor, step: int, bins: int = 64):
+    v = vec.detach().float().view(-1)
+    writer.add_histogram(f"dist/{name}", v, step, bins=bins)
+    writer.add_scalar(f"stats/{name}_mean", v.mean(), step)
+    writer.add_scalar(f"stats/{name}_std",  v.std(unbiased=False), step)
+    writer.add_scalar(f"stats/{name}_min",  v.min(), step)
+    writer.add_scalar(f"stats/{name}_max",  v.max(), step)
+
+def _first_linear(module: nn.Module):
+    if module is None:
+        return None
+    if isinstance(module, nn.Sequential):
+        for m in module:
+            if isinstance(m, nn.Linear):
+                return m
+    if isinstance(module, nn.Linear):
+        return module
+    # common patterns: custom SineLayer may wrap a linear as .linear or .fc
+    for attr in ("linear", "fc", "proj"):
+        if hasattr(module, attr) and isinstance(getattr(module, attr), nn.Linear):
+            return getattr(module, attr)
+    return None
+
+def _log_linear_stats(writer: SummaryWriter, name: str, linear: nn.Linear, step: int):
+    W = linear.weight.detach().float()                       # [out, in]
+    writer.add_histogram(f"lin/{name}/weight", W, step)
+    writer.add_scalar(  f"lin/{name}/weight_l2", W.norm(), step)
+    # per-input (column) L2 tells you which inputs/encodings are used most
+    col_l2 = torch.linalg.vector_norm(W, dim=0)              # [in]
+    writer.add_histogram(f"lin/{name}/col_l2", col_l2, step)
+    if linear.bias is not None:
+        _log_vector_dist(writer, f"lin/{name}/bias", linear.bias, step)
+
+def _log_sine_like(writer: SummaryWriter, name: str, layer: nn.Module, step: int):
+    # If your SineLayer exposes raw tensors, log them.
+    for attr in ("weight", "bias", "w0", "omega", "freq"):
+        t = getattr(layer, attr, None)
+        if isinstance(t, torch.Tensor):
+            _log_vector_dist(writer, f"{name}/{attr}", t, step)
+
+def log_enc_debug(writer: SummaryWriter, model, epoch: int):
+    # 1) Learned frequency distributions
+    if getattr(model, "learned_encodings", False):
+        if hasattr(model, "pos_freqs"):
+            _log_vector_dist(writer, "pos_freqs", model.pos_freqs, epoch)
+        if hasattr(model, "time_freqs"):
+            _log_vector_dist(writer, "time_freqs", model.time_freqs, epoch)
+
+    # 2) First linear(s) behind time/pos embeddings (handles SineLayer or Sequential)
+    if hasattr(model, "time_embed") and model.time_embed is not None:
+        lin = _first_linear(model.time_embed)
+        if lin is not None:
+            _log_linear_stats(writer, "time_embed", lin, epoch)
+        else:
+            _log_sine_like(writer, "time_embed_sine", model.time_embed, epoch)
+
+    if hasattr(model, "pos_embed") and model.pos_embed is not None:
+        lin = _first_linear(model.pos_embed)
+        if lin is not None:
+            _log_linear_stats(writer, "pos_embed", lin, epoch)
+        else:
+            _log_sine_like(writer, "pos_embed_sine", model.pos_embed, epoch)
 
 def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, experiment_name=None, decoder_config=None):
     image_tensor = load_images(image_dir)
@@ -338,6 +401,7 @@ def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, expe
                     writer.add_image(f'Images/Comparison_t{t}', comparison[i], epoch)
 
                 print(f"SSIM result: {ssim_result.item():.4f}, PSNR result: {psnr_result.item():.4f}")
+                log_enc_debug(writer, model, epoch)
         global_step += 1
 
 

@@ -6,23 +6,19 @@ from encoding_utils import SineLayer, Tanh01, kernel_expand, compute_targeted_en
 class VFXSpiralNetDecoder(nn.Module):
     def __init__(self, **kwargs):
         defaults = {
-            "latent_dim": 4,
+            "latent_dim": 128,
             "trunk_pos_channels": 0,
             "trunk_pos_scheme": "sinusoidal",
             "trunk_pos_include_raw": True,
-            "trunk_pos_include_norm": True,
             "trunk_time_channels": 0,
             "trunk_time_scheme": "sinusoidal",
             "trunk_time_include_raw": True,
-            "trunk_time_include_norm": True,
             "film_time_channels": 8,
             "film_time_scheme": "spiral",
             "film_time_include_raw": True,
-            "film_time_include_norm": True,
             "film_pos_channels": 16,
             "film_pos_scheme": "spiral",
             "film_pos_include_raw": True,
-            "film_pos_include_norm": True,
             "output_channels": 4,
             "hidden_dim": 64,
             "prefilm_dims": 32,
@@ -38,6 +34,9 @@ class VFXSpiralNetDecoder(nn.Module):
 
         super().__init__()
         input_dim = self.latent_dim + self.trunk_pos_channels + self.trunk_time_channels
+
+        if self.latent_dim > 0:
+            self.latent = nn.Parameter(torch.randn(self.latent_dim), requires_grad=True)
 
         if self.prefilm_dims > 0:
             if self.film_time_channels > 0:
@@ -83,25 +82,18 @@ class VFXSpiralNetDecoder(nn.Module):
         self.layers.append(nn.Sigmoid())
 
         if self.learned_encodings:
-            self.pos_freqs = nn.Parameter(torch.randn(self.film_pos_channels), requires_grad=True)
-            self.time_freqs = nn.Parameter(torch.randn(self.film_time_channels), requires_grad=True)
+            net_film_pos_channels = self.film_pos_channels - (2 if self.film_pos_include_raw else 0)
+            self.pos_freqs = nn.Parameter(torch.randn(net_film_pos_channels).abs(), requires_grad=True)
+            net_film_time_channels = self.film_time_channels - (1 if self.film_time_include_raw else 0)
+            self.time_freqs = nn.Parameter(torch.randn(net_film_time_channels).abs(), requires_grad=True)
         else:
             self.pos_freqs = None
             self.time_freqs = None
 
     def forward(self, raw_pos, time, latent=None, return_hidden_layer=None):
+        trunk_input = []
         if self.latent_dim > 0:
-            print("The world has ended")
-            x = raw_pos[:, 0:1]
-            y = raw_pos[:, 1:2]
-            B, H, W, C = latent.shape
-            latent_flat = latent.view(B, -1, C)
-            flat_idx = y * W + x  # [B]
-            indexed_latent = latent_flat[torch.arange(B), flat_idx]
-
-        main_input = []
-        if self.latent_dim > 0:
-            main_input.append(indexed_latent)
+            trunk_inpute.append(self.latent)
         
         if self.trunk_pos_channels > 0:
             pos_enc = compute_targeted_encodings(
@@ -109,10 +101,8 @@ class VFXSpiralNetDecoder(nn.Module):
                 self.trunk_pos_channels,
                 scheme=self.trunk_pos_scheme,
                 include_raw=self.trunk_pos_include_raw,
-                norm_2pi=True,
-                include_norm=self.trunk_pos_include_norm,
             )
-            main_input.append(pos_enc)
+            trunk_input.append(pos_enc)
 
         if self.trunk_time_channels > 0:
             trunk_time = compute_targeted_encodings(
@@ -120,12 +110,10 @@ class VFXSpiralNetDecoder(nn.Module):
                 self.trunk_time_channels,
                 scheme=self.trunk_time_scheme,
                 include_raw=self.trunk_time_include_raw,
-                norm_2pi=True,
-                include_norm=self.trunk_time_include_norm,
             )
-            main_input.append(trunk_time)
+            trunk_input.append(trunk_time)
 
-        main_input = torch.cat(main_input, dim=1)
+        trunk_input = torch.cat(trunk_input, dim=1)
 
         film_input = []
         if self.film_pos_channels > 0:
@@ -134,8 +122,6 @@ class VFXSpiralNetDecoder(nn.Module):
                 self.film_pos_channels,
                 scheme=self.film_pos_scheme,
                 include_raw=self.film_pos_include_raw,
-                norm_2pi=True,
-                include_norm=self.film_pos_include_norm,
                 freqs=self.pos_freqs,
             )
             if self.prefilm_dims > 0:
@@ -148,8 +134,6 @@ class VFXSpiralNetDecoder(nn.Module):
                 self.film_time_channels,
                 scheme=self.film_time_scheme,
                 include_raw=self.film_time_include_raw,
-                norm_2pi=True,
-                include_norm=self.film_time_include_norm,
                 freqs=self.time_freqs,
             )
             if self.prefilm_dims > 0:
@@ -161,7 +145,7 @@ class VFXSpiralNetDecoder(nn.Module):
         else:
             film_input = None
 
-        outputs = main_input
+        outputs = trunk_input
         for i, layer in enumerate(self.layers):
             if i in self.apply_film and film_input is not None:
                 gamma, beta = self.film(film_input).chunk(2, dim=-1)
