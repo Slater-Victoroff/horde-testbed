@@ -149,14 +149,14 @@ def inspect_film(
     spiral_pos = compute_targeted_encodings(
         torch.tensor([[u, v]], device=device, dtype=torch.float32),
         spiral_pos_channels,
-        scheme="spiral", norm_2pi=True, include_norm=True
+        scheme="spiral"
     )
     
     # 2. spiral-time       (8)
     spiral_time = compute_targeted_encodings(
         control[:, :1],
         spiral_time_channels,
-        scheme="spiral", include_raw=True, norm_2pi=True, include_norm=True
+        scheme="spiral", include_raw=True
     )
     
     # 3. pass through the *learned* embed MLPs inside the decoder

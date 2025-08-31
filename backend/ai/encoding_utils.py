@@ -1,8 +1,10 @@
+import math
 import numpy as np
 
 import torch
 import torch.nn as nn
 
+from functools import partial
 
 def kernel_expand(raw_pos, height, width, kernel_size=3):
     """
@@ -30,19 +32,170 @@ def kernel_expand(raw_pos, height, width, kernel_size=3):
     return torch.stack([expanded_x, expanded_y], dim=-1).view(-1, kernel_size ** 2, 2)
 
 
-def compute_spiral_encoding(x, num_harmonics):
+def compute_spiral_encoding(x, target_dim, freqs=None, amps=None):
     out = []
-    for i in range(1, num_harmonics + 1):
-        out += [torch.sin(i * x) / i, torch.cos(i * x) / i]
+    if freqs is None:
+        num_harmonics = (target_dim // 2) + 1
+        freqs = torch.arange(1, num_harmonics + 1, device=x.device).repeat_interleave(2)
+    if amps is None:
+        amps = torch.ones_like(freqs)
+    for i in range(freqs.shape[0]):
+        if i % 2 == 1:
+            out += torch.sin(freqs[i] * x * 2 * np.pi) * amps[i]
+        elif i % 2 == 0:
+            out += torch.cos(freqs[i] * x * 2 * np.pi) * amps[i]
     return torch.cat(out, dim=-1)
 
 
-def compute_sinusoidal_encoding(coords, num_harmonics):
-    encodings = []
-    for i in range(1, num_harmonics + 1):
-        encodings += [torch.sin(i * coords), torch.cos(i * coords)]
+def compute_sinusoidal_encoding(coords, target_dim, freqs=None):
+    cycle_length = 2
+    N = int(coords.shape[1])
+
+    num_harmonics = int(math.ceil(target_dim / (cycle_length * N)))
+    if freqs is None:
+        freqs = torch.arange(1, num_harmonics + 1, device=coords.device).repeat_interleave(N).repeat(cycle_length)
+        freqs = freqs[:target_dim]  # Ensure we only take as many frequencies as needed
+
+    reshaped_coords = coords.repeat([1, math.ceil(target_dim / N)])
+    updated_coords = freqs.unsqueeze(0) * reshaped_coords
+
+    sin_chunk, cos_chunk = updated_coords.split(num_harmonics * N, dim=1)
+
+    encodings = [
+        torch.sin(sin_chunk * 2 * np.pi),
+        torch.cos(cos_chunk * 2 * np.pi)
+    ]
+
+    encoded_tensor = torch.cat(encodings, dim=-1)
     return torch.cat(encodings, dim=-1)
 
+
+def compute_mathy_encoding(coords, target_dim, freqs=None):
+    cycle_length = 8
+    N = int(coords.shape[1])
+
+    num_harmonics = int(math.ceil(target_dim / (cycle_length * N)))
+    if freqs is None:
+        freqs = torch.arange(1, num_harmonics + 1, device=coords.device).repeat_interleave(N).repeat(cycle_length)
+        freqs = freqs[:target_dim]  # Ensure we only take as many frequencies as needed
+
+    reshaped_coords = coords.repeat([1, math.ceil(target_dim / N)])
+    updated_coords = torch.clamp(freqs.unsqueeze(0) * reshaped_coords, min=1e-5)  # epsilon to help with stability at 0
+
+    sin_chunk, cos_chunk, exp_chunk, log1p_chunk, sqrt_chunk, inv_chunk, rsqrt_chunk, sq_chunk = updated_coords.split(num_harmonics * N, dim=1)
+
+    encodings = torch.cat([
+        torch.sin(sin_chunk * 2 * np.pi),
+        torch.cos(cos_chunk * 2 * np.pi),
+        torch.exp(exp_chunk),
+        torch.log1p(log1p_chunk),
+        torch.sqrt(sqrt_chunk),
+        1 / (inv_chunk),
+        torch.rsqrt(rsqrt_chunk),
+        sq_chunk * sq_chunk,
+    ], dim=1)
+
+    return encodings
+
+
+def compute_less_mathy_encoding(coords, target_dim, freqs=None):
+    cycle_length = 4
+    N = int(coords.shape[1])
+
+    num_harmonics = int(math.ceil(target_dim / (cycle_length * N)))
+    if freqs is None:
+        freqs = torch.arange(1, num_harmonics + 1, device=coords.device).repeat_interleave(N).repeat(cycle_length)
+        freqs = freqs[:target_dim]  # Ensure we only take as many frequencies as needed
+
+    reshaped_coords = coords.repeat([1, math.ceil(target_dim / N)])
+    updated_coords = torch.clamp(freqs.unsqueeze(0) * reshaped_coords, min=1e-5)  # epsilon to help with stability at 0
+
+    sin_chunk, cos_chunk, exp_chunk, log1p_chunk = updated_coords.split(num_harmonics * N, dim=1)
+
+    encodings = torch.cat([
+        torch.sin(sin_chunk * 2 * np.pi),
+        torch.cos(cos_chunk * 2 * np.pi),
+        torch.exp(exp_chunk),
+        torch.log1p(log1p_chunk),
+    ], dim=1)
+
+    return encodings
+
+
+def compute_sinexp_encoding(coords, target_dim, freqs=None):
+    cycle_length = 2
+    N = int(coords.shape[1])
+
+    num_harmonics = int(math.ceil(target_dim / (cycle_length * N)))
+    if freqs is None:
+        freqs = torch.arange(1, num_harmonics + 1, device=coords.device).repeat_interleave(N).repeat(cycle_length)
+        freqs = freqs[:target_dim]  # Ensure we only take as many frequencies as needed
+
+    reshaped_coords = coords.repeat([1, math.ceil(target_dim / N)])
+    updated_coords = torch.clamp(freqs.unsqueeze(0) * reshaped_coords, min=1e-5)  # epsilon to help with stability at 0
+
+    sin_chunk, exp_chunk = updated_coords.split(num_harmonics * N, dim=1)
+
+    encodings = torch.cat([
+        torch.sin(sin_chunk * 2 * np.pi),
+        torch.exp(exp_chunk),
+    ], dim=1)
+
+    return encodings
+
+
+def compute_coslog_encoding(coords, target_dim, freqs=None):
+    cycle_length = 2
+    N = int(coords.shape[1])
+
+    num_harmonics = int(math.ceil(target_dim / (cycle_length * N)))
+    if freqs is None:
+        freqs = torch.arange(1, num_harmonics + 1, device=coords.device).repeat_interleave(N).repeat(cycle_length)
+        freqs = freqs[:target_dim]  # Ensure we only take as many frequencies as needed
+
+    reshaped_coords = coords.repeat([1, math.ceil(target_dim / N)])
+    updated_coords = torch.clamp(freqs.unsqueeze(0) * reshaped_coords, min=1e-5)  # epsilon to help with stability at 0
+
+    cos_chunk, log1p_chunk = updated_coords.split(num_harmonics * N, dim=1)
+
+    encodings = torch.cat([
+        torch.cos(cos_chunk * 2 * np.pi),
+        torch.log1p(log1p_chunk),
+    ], dim=1)
+
+    return encodings
+
+
+def compute_analytic_encoding(coords, target_dim, freqs=None, encoding_cycle=["sin", "cos", "exp", "log1p"]):
+    cycle_length = len(encoding_cycle)
+    N = int(coords.shape[1])
+
+    num_harmonics = int(math.ceil(target_dim / (cycle_length * N)))
+    if freqs is None:
+        freqs = torch.arange(1, num_harmonics + 1, device=coords.device).repeat_interleave(N).repeat(cycle_length)
+        freqs = freqs[:target_dim]  # Ensure we only take as many frequencies as needed
+
+    reshaped_coords = coords.repeat([1, math.ceil(target_dim / N)])
+    updated_coords = torch.clamp(freqs.unsqueeze(0) * reshaped_coords, min=0)
+
+    encodings = []
+    chunk_size = num_harmonics * N
+    chunks = updated_coords.split(chunk_size, dim=1)
+
+    for i, func in enumerate(encoding_cycle):
+        chunk = chunks[i]
+        if func == "sin":
+            encodings.append(torch.sin(chunk * 2 * np.pi))
+        elif func == "cos":
+            encodings.append(torch.cos(chunk * 2 * np.pi))
+        elif func == "exp":
+            encodings.append(torch.exp(chunk))
+        elif func == "log1p":
+            encodings.append(torch.log1p(chunk))
+        else:
+            raise ValueError(f"Unknown encoding function: {func}")
+
+    return torch.cat(encodings, dim=1)
 
 def compute_linear_encoding(x, target_dim):
     return x.repeat(1, target_dim // x.shape[-1])[:, :target_dim]
@@ -62,43 +215,44 @@ def compute_gaussian_encoding(x, target_dim, std=10.0, seed=42):
     return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
 
 
-def compute_targeted_encodings(x, target_dim, scheme="spiral", norm_2pi=True, include_norm=False, include_raw=False, seed=42):
+def compute_targeted_encodings(x, target_dim, scheme="spiral", include_raw=False, freqs=None, seed=42, encoding_cycle=None):
     _, N = x.shape
     encodings = []
 
     if include_raw:
         encodings.append(x)
+        target_dim -= N
+    target_dim = int(target_dim)
 
-    if norm_2pi:
-        x = x * 2 * torch.pi
-        if include_norm:
-            encodings.append(x)
-
-    if scheme in ["spiral", "sinusoidal"]:
-        num_harmonics = ((target_dim - (N if include_raw else 0)) // 2) + 1
-        encoding_fn = {
-            "spiral": compute_spiral_encoding,
-            "sinusoidal": compute_sinusoidal_encoding,
-        }[scheme]
-        encodings.append(encoding_fn(x, num_harmonics=num_harmonics))
-    elif scheme == "gaussian":
-        encodings.append(compute_gaussian_encoding(x, target_dim, seed=seed))
-    elif scheme == "linear":
-        encodings.append(compute_linear_encoding(x, target_dim))
-    elif scheme == "polynomial":
-        deg = target_dim // x.shape[-1]
-        encodings.append(compute_polynomial_encoding(x, deg))
-    elif scheme is None:
-        encodings.append(torch.zeros(x.shape[0], target_dim, device=x.device))
-    else:
-        raise ValueError(f"Unknown encoding scheme: {scheme}")
-
-    return torch.cat(encodings, dim=-1)[:, :target_dim]
+    if target_dim > 0:
+        if scheme in ["spiral", "sinusoidal", "mathy", "less_mathy", "sinexp", "coslog", "analytic"]:
+            encoding_fn = {
+                "spiral": compute_spiral_encoding,
+                "sinusoidal": compute_sinusoidal_encoding,
+                "mathy": compute_mathy_encoding,
+                "less_mathy": compute_less_mathy_encoding,
+                "sinexp": compute_sinexp_encoding,
+                "coslog": compute_coslog_encoding,
+                "analytic": partial(compute_analytic_encoding, encoding_cycle=encoding_cycle)
+            }[scheme]
+            encodings.append(encoding_fn(x, target_dim, freqs=freqs))
+        elif scheme == "gaussian":
+            encodings.append(compute_gaussian_encoding(x, target_dim, seed=seed))
+        elif scheme == "linear":
+            encodings.append(compute_linear_encoding(x, target_dim))
+        elif scheme == "polynomial":
+            deg = target_dim // x.shape[-1]
+            encodings.append(compute_polynomial_encoding(x, deg))
+        elif scheme is None:
+            encodings.append(torch.zeros(x.shape[0], target_dim, device=x.device))
+        else:
+            raise ValueError(f"Unknown encoding scheme: {scheme}")
+    return torch.cat(encodings, dim=-1)
 
 
 class SineLayer(nn.Module):
     """Siren activation function."""
-    def __init__(self, in_features, out_features, is_first=False, omega=10.0):
+    def __init__(self, in_features, out_features, is_first=False, omega=30.0):
         super().__init__()
         self.omega = omega
         self.is_first = is_first
