@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 
@@ -27,6 +29,8 @@ class VFXSpiralNetDecoder(nn.Module):
             "learned_encodings": False,
             "siren_film": False,
             "siren_trunk": False,
+            "encoding_cycle": None,
+            "frequency_initialization": "linear",
         }
         defaults.update(kwargs)
         for key, value in defaults.items():
@@ -36,7 +40,7 @@ class VFXSpiralNetDecoder(nn.Module):
         input_dim = self.latent_dim + self.trunk_pos_channels + self.trunk_time_channels
 
         if self.latent_dim > 0:
-            self.latent = nn.Parameter(torch.randn(self.latent_dim), requires_grad=True)
+            self.latent = nn.Parameter(torch.randn(self.latent_dim, 1), requires_grad=True)
 
         if self.prefilm_dims > 0:
             if self.film_time_channels > 0:
@@ -82,18 +86,42 @@ class VFXSpiralNetDecoder(nn.Module):
         self.layers.append(nn.Sigmoid())
 
         if self.learned_encodings:
-            net_film_pos_channels = self.film_pos_channels - (2 if self.film_pos_include_raw else 0)
-            self.pos_freqs = nn.Parameter(torch.randn(net_film_pos_channels).abs(), requires_grad=True)
-            net_film_time_channels = self.film_time_channels - (1 if self.film_time_include_raw else 0)
-            self.time_freqs = nn.Parameter(torch.randn(net_film_time_channels).abs(), requires_grad=True)
+            target_pos_dim = self.film_pos_channels - (2 if self.film_pos_include_raw else 0)
+            num_pos_harmonics = int(math.ceil(target_pos_dim / (len(self.encoding_cycle) * 2)))
+            if self.frequency_initialization == "linear":
+                base_pos_freqs = torch.arange(1, num_pos_harmonics + 1)
+            elif self.frequency_initialization == "exponential":
+                base_pos_freqs = 2 ** torch.arange(1, num_pos_harmonics + 1)
+            elif self.frequency_initialization == "inverse":
+                initial_freqs = torch.abs(torch.randn(1, num_pos_harmonics + 1)).clamp(min=1e-3)
+                base_pos_freqs = 1.0 / initial_freqs
+            elif self.frequency_initialization == "logarithmic":
+                base_pos_freqs = torch.logspace(0, num_pos_harmonics, steps=num_pos_harmonics)
+            full_pos_freqs = base_pos_freqs.repeat_interleave(2).repeat(len(self.encoding_cycle))
+            self.pos_freqs = nn.Parameter(full_pos_freqs[:target_pos_dim].float(), requires_grad=True)
+
+            target_time_dim = self.film_time_channels - (1 if self.film_time_include_raw else 0)
+            num_time_harmonics = int(math.ceil(target_time_dim / len(self.encoding_cycle)))
+            if self.frequency_initialization == "linear":
+                base_time_freqs = torch.arange(1, num_time_harmonics + 1)
+            elif self.frequency_initialization == "exponential":
+                base_time_freqs = 2 ** torch.arange(1, num_time_harmonics + 1)
+            elif self.frequency_initialization == "inverse":
+                initial_freqs = torch.abs(torch.randn(1, num_time_harmonics + 1)).clamp(min=1e-3)
+                base_time_freqs = 1.0 / initial_freqs
+            elif self.frequency_initialization == "logarithmic":
+                base_time_freqs = torch.logspace(0, num_pos_harmonics, steps=num_time_harmonics)
+            full_time_freqs = base_time_freqs.repeat_interleave(1).repeat(len(self.encoding_cycle))
+            self.time_freqs = nn.Parameter(full_time_freqs[:target_time_dim].float(), requires_grad=True)
         else:
             self.pos_freqs = None
             self.time_freqs = None
 
     def forward(self, raw_pos, time, latent=None, return_hidden_layer=None):
+        B, _ = raw_pos.shape
         trunk_input = []
         if self.latent_dim > 0:
-            trunk_inpute.append(self.latent)
+            trunk_input.append(self.latent.expand(-1, B).T)
         
         if self.trunk_pos_channels > 0:
             pos_enc = compute_targeted_encodings(
@@ -113,7 +141,7 @@ class VFXSpiralNetDecoder(nn.Module):
             )
             trunk_input.append(trunk_time)
 
-        trunk_input = torch.cat(trunk_input, dim=1)
+        trunk_input = torch.cat(trunk_input, dim=-1)
 
         film_input = []
         if self.film_pos_channels > 0:
@@ -123,6 +151,7 @@ class VFXSpiralNetDecoder(nn.Module):
                 scheme=self.film_pos_scheme,
                 include_raw=self.film_pos_include_raw,
                 freqs=self.pos_freqs,
+                encoding_cycle=self.encoding_cycle,
             )
             if self.prefilm_dims > 0:
                 film_pos = self.pos_embed(film_pos)
@@ -135,6 +164,7 @@ class VFXSpiralNetDecoder(nn.Module):
                 scheme=self.film_time_scheme,
                 include_raw=self.film_time_include_raw,
                 freqs=self.time_freqs,
+                encoding_cycle=self.encoding_cycle,
             )
             if self.prefilm_dims > 0:
                 film_time = self.time_embed(film_time)

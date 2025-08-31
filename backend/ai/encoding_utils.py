@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from functools import partial
 
 def kernel_expand(raw_pos, height, width, kernel_size=3):
     """
@@ -121,6 +122,81 @@ def compute_less_mathy_encoding(coords, target_dim, freqs=None):
     return encodings
 
 
+def compute_sinexp_encoding(coords, target_dim, freqs=None):
+    cycle_length = 2
+    N = int(coords.shape[1])
+
+    num_harmonics = int(math.ceil(target_dim / (cycle_length * N)))
+    if freqs is None:
+        freqs = torch.arange(1, num_harmonics + 1, device=coords.device).repeat_interleave(N).repeat(cycle_length)
+        freqs = freqs[:target_dim]  # Ensure we only take as many frequencies as needed
+
+    reshaped_coords = coords.repeat([1, math.ceil(target_dim / N)])
+    updated_coords = torch.clamp(freqs.unsqueeze(0) * reshaped_coords, min=1e-5)  # epsilon to help with stability at 0
+
+    sin_chunk, exp_chunk = updated_coords.split(num_harmonics * N, dim=1)
+
+    encodings = torch.cat([
+        torch.sin(sin_chunk * 2 * np.pi),
+        torch.exp(exp_chunk),
+    ], dim=1)
+
+    return encodings
+
+
+def compute_coslog_encoding(coords, target_dim, freqs=None):
+    cycle_length = 2
+    N = int(coords.shape[1])
+
+    num_harmonics = int(math.ceil(target_dim / (cycle_length * N)))
+    if freqs is None:
+        freqs = torch.arange(1, num_harmonics + 1, device=coords.device).repeat_interleave(N).repeat(cycle_length)
+        freqs = freqs[:target_dim]  # Ensure we only take as many frequencies as needed
+
+    reshaped_coords = coords.repeat([1, math.ceil(target_dim / N)])
+    updated_coords = torch.clamp(freqs.unsqueeze(0) * reshaped_coords, min=1e-5)  # epsilon to help with stability at 0
+
+    cos_chunk, log1p_chunk = updated_coords.split(num_harmonics * N, dim=1)
+
+    encodings = torch.cat([
+        torch.cos(cos_chunk * 2 * np.pi),
+        torch.log1p(log1p_chunk),
+    ], dim=1)
+
+    return encodings
+
+
+def compute_analytic_encoding(coords, target_dim, freqs=None, encoding_cycle=["sin", "cos", "exp", "log1p"]):
+    cycle_length = len(encoding_cycle)
+    N = int(coords.shape[1])
+
+    num_harmonics = int(math.ceil(target_dim / (cycle_length * N)))
+    if freqs is None:
+        freqs = torch.arange(1, num_harmonics + 1, device=coords.device).repeat_interleave(N).repeat(cycle_length)
+        freqs = freqs[:target_dim]  # Ensure we only take as many frequencies as needed
+
+    reshaped_coords = coords.repeat([1, math.ceil(target_dim / N)])
+    updated_coords = torch.clamp(freqs.unsqueeze(0) * reshaped_coords, min=0)
+
+    encodings = []
+    chunk_size = num_harmonics * N
+    chunks = updated_coords.split(chunk_size, dim=1)
+
+    for i, func in enumerate(encoding_cycle):
+        chunk = chunks[i]
+        if func == "sin":
+            encodings.append(torch.sin(chunk * 2 * np.pi))
+        elif func == "cos":
+            encodings.append(torch.cos(chunk * 2 * np.pi))
+        elif func == "exp":
+            encodings.append(torch.exp(chunk))
+        elif func == "log1p":
+            encodings.append(torch.log1p(chunk))
+        else:
+            raise ValueError(f"Unknown encoding function: {func}")
+
+    return torch.cat(encodings, dim=1)
+
 def compute_linear_encoding(x, target_dim):
     return x.repeat(1, target_dim // x.shape[-1])[:, :target_dim]
 
@@ -139,7 +215,7 @@ def compute_gaussian_encoding(x, target_dim, std=10.0, seed=42):
     return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
 
 
-def compute_targeted_encodings(x, target_dim, scheme="spiral", include_raw=False, freqs=None, seed=42):
+def compute_targeted_encodings(x, target_dim, scheme="spiral", include_raw=False, freqs=None, seed=42, encoding_cycle=None):
     _, N = x.shape
     encodings = []
 
@@ -149,12 +225,15 @@ def compute_targeted_encodings(x, target_dim, scheme="spiral", include_raw=False
     target_dim = int(target_dim)
 
     if target_dim > 0:
-        if scheme in ["spiral", "sinusoidal", "mathy"]:
+        if scheme in ["spiral", "sinusoidal", "mathy", "less_mathy", "sinexp", "coslog", "analytic"]:
             encoding_fn = {
                 "spiral": compute_spiral_encoding,
                 "sinusoidal": compute_sinusoidal_encoding,
                 "mathy": compute_mathy_encoding,
                 "less_mathy": compute_less_mathy_encoding,
+                "sinexp": compute_sinexp_encoding,
+                "coslog": compute_coslog_encoding,
+                "analytic": partial(compute_analytic_encoding, encoding_cycle=encoding_cycle)
             }[scheme]
             encodings.append(encoding_fn(x, target_dim, freqs=freqs))
         elif scheme == "gaussian":

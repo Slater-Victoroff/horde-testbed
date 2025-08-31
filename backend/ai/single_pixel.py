@@ -59,10 +59,7 @@ class VFXNet(nn.Module):
         flat_raw_pos = pos_patch.view(-1, pos_patch.shape[-1])
         flat_control = time_patch.view(-1, time_patch.shape[-1])
 
-        if self.decoder.latent_dim > 0:
-            raise NotImplementedError("Latent images not supported in run_patch")
-        else:
-            return self.decoder(flat_raw_pos, flat_control).view(*pos_patch.shape[:-1], self.output_channels)
+        return self.decoder(flat_raw_pos, flat_control).view(*pos_patch.shape[:-1], self.output_channels)
 
     def full_image(self, time, H=512, W=512):
         x_coords = torch.linspace(0, 1, W, device=self.device)
@@ -71,15 +68,9 @@ class VFXNet(nn.Module):
         raw_pos = torch.stack([grid_x, grid_y], dim=-1)
         expanded_time = time.repeat(H, W, 1)
 
-        if self.decoder.latent_dim > 0:
-            print("Again, the world has ended.")
-            latent = self.latents(control[:, 1].long())
-            latent = latent.view(-1, H, W, LATENT_IMAGE_CHANNELS)
-            response = self.decoder(raw_pos, expanded_time, latent)
-        else:
-            flat_pos = raw_pos.view(-1, 2)
-            flat_time = expanded_time.view(-1, 1)
-            response = self.decoder(flat_pos, flat_time)
+        flat_pos = raw_pos.view(-1, 2)
+        flat_time = expanded_time.view(-1, 1)
+        response = self.decoder(flat_pos, flat_time)
         shaped_image = response.view(H, W, self.output_channels)
         return shaped_image
 
@@ -233,13 +224,10 @@ class PatchSampler(torch.utils.data.IterableDataset):
             )
 
 
-def _log_vector_dist(writer: SummaryWriter, name: str, vec: torch.Tensor, step: int, bins: int = 64):
+def log_vector(writer, name: str, vec: torch.Tensor, step: int, bins: int = 64):
     v = vec.detach().float().view(-1)
-    writer.add_histogram(f"dist/{name}", v, step, bins=bins)
-    writer.add_scalar(f"stats/{name}_mean", v.mean(), step)
-    writer.add_scalar(f"stats/{name}_std",  v.std(unbiased=False), step)
-    writer.add_scalar(f"stats/{name}_min",  v.min(), step)
-    writer.add_scalar(f"stats/{name}_max",  v.max(), step)
+    writer.add_histogram(f"{name}/hist", v, step, bins=bins)
+
 
 def _first_linear(module: nn.Module):
     if module is None:
@@ -257,44 +245,27 @@ def _first_linear(module: nn.Module):
     return None
 
 def _log_linear_stats(writer: SummaryWriter, name: str, linear: nn.Linear, step: int):
-    W = linear.weight.detach().float()                       # [out, in]
-    writer.add_histogram(f"lin/{name}/weight", W, step)
-    writer.add_scalar(  f"lin/{name}/weight_l2", W.norm(), step)
-    # per-input (column) L2 tells you which inputs/encodings are used most
-    col_l2 = torch.linalg.vector_norm(W, dim=0)              # [in]
-    writer.add_histogram(f"lin/{name}/col_l2", col_l2, step)
-    if linear.bias is not None:
-        _log_vector_dist(writer, f"lin/{name}/bias", linear.bias, step)
+    W = linear.weight.detach().cpu().float()   # [out, in]
+    col_norm = torch.linalg.vector_norm(W, dim=0)  # [in]
 
-def _log_sine_like(writer: SummaryWriter, name: str, layer: nn.Module, step: int):
-    # If your SineLayer exposes raw tensors, log them.
-    for attr in ("weight", "bias", "w0", "omega", "freq"):
-        t = getattr(layer, attr, None)
-        if isinstance(t, torch.Tensor):
-            _log_vector_dist(writer, f"{name}/{attr}", t, step)
+    for i, val in enumerate(col_norm):
+        writer.add_scalar(f"{name}/col_norm/index_{i}", val.item(), step)
 
 def log_enc_debug(writer: SummaryWriter, model, epoch: int):
     # 1) Learned frequency distributions
-    if getattr(model, "learned_encodings", False):
-        if hasattr(model, "pos_freqs"):
-            _log_vector_dist(writer, "pos_freqs", model.pos_freqs, epoch)
-        if hasattr(model, "time_freqs"):
-            _log_vector_dist(writer, "time_freqs", model.time_freqs, epoch)
+    decoder = model.decoder
+    if decoder.learned_encodings:
+        log_vector(writer, "pos_freqs", decoder.pos_freqs, epoch)
+        log_vector(writer, "time_freqs", decoder.time_freqs, epoch)
 
     # 2) First linear(s) behind time/pos embeddings (handles SineLayer or Sequential)
-    if hasattr(model, "time_embed") and model.time_embed is not None:
-        lin = _first_linear(model.time_embed)
-        if lin is not None:
-            _log_linear_stats(writer, "time_embed", lin, epoch)
-        else:
-            _log_sine_like(writer, "time_embed_sine", model.time_embed, epoch)
+    if decoder.time_embed:
+        lin = _first_linear(decoder.time_embed)
+        _log_linear_stats(writer, "time_embed", lin, epoch)
 
-    if hasattr(model, "pos_embed") and model.pos_embed is not None:
-        lin = _first_linear(model.pos_embed)
-        if lin is not None:
-            _log_linear_stats(writer, "pos_embed", lin, epoch)
-        else:
-            _log_sine_like(writer, "pos_embed_sine", model.pos_embed, epoch)
+    if decoder.pos_embed:
+        lin = _first_linear(decoder.pos_embed)
+        _log_linear_stats(writer, "pos_embed", lin, epoch)
 
 def train_vfx_model(image_dir, device='cuda', epochs=1000, batch_size=8192, experiment_name=None, decoder_config=None):
     image_tensor = load_images(image_dir)

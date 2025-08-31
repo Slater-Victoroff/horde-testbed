@@ -268,52 +268,215 @@ EXPERIMENTS = []
 #     ]
 
 
+# for i in range(3):
+#     EXPERIMENTS += [
+#         {
+#             "name": f"SinExpEncodingTest{i}",
+#             "dataset": "VFX/firething",
+#             "config": {
+#                 "latent_dim": 0,
+#                 "trunk_pos_channels": 2,
+#                 "trunk_time_channels": 1,
+#                 "film_pos_channels": 256,
+#                 "film_time_channels": 64,
+#                 "film_pos_scheme": "sinexp",
+#                 "film_time_scheme": "sinexp",
+#                 "film_pos_include_raw": True,
+#                 "film_time_include_raw": True,
+#                 "prefilm_dims": 32,
+#                 "hidden_dim": 64,
+#                 "apply_film": [1],
+#                 "output_channels": 3,
+#                 "learned_encodings": True,
+#                 "siren_film": False,
+#             }
+#         }
+#     ]
+
+# for i in range(3):
+#     EXPERIMENTS += [
+#         {
+#             "name": f"CosLogEncodingTest{i}",
+#             "dataset": "VFX/firething",
+#             "config": {
+#                 "latent_dim": 0,
+#                 "trunk_pos_channels": 2,
+#                 "trunk_time_channels": 1,
+#                 "film_pos_channels": 256,
+#                 "film_time_channels": 64,
+#                 "film_pos_scheme": "coslog",
+#                 "film_time_scheme": "coslog",
+#                 "film_pos_include_raw": True,
+#                 "film_time_include_raw": True,
+#                 "prefilm_dims": 32,
+#                 "hidden_dim": 64,
+#                 "apply_film": [1],
+#                 "output_channels": 3,
+#                 "learned_encodings": True,
+#                 "siren_film": False,
+#             }
+#         }
+#     ]
+
+
+# for i in range(3):
+#     EXPERIMENTS += [
+#         {
+#             "name": f"PureSinEncodingTest{i}",
+#             "dataset": "VFX/firething",
+#             "config": {
+#                 "latent_dim": 0,
+#                 "trunk_pos_channels": 2,
+#                 "trunk_time_channels": 1,
+#                 "film_pos_channels": 256,
+#                 "film_time_channels": 64,
+#                 "film_pos_scheme": "sin",
+#                 "film_time_scheme": "sin",
+#                 "film_pos_include_raw": True,
+#                 "film_time_include_raw": True,
+#                 "prefilm_dims": 32,
+#                 "hidden_dim": 64,
+#                 "apply_film": [1],
+#                 "output_channels": 3,
+#                 "learned_encodings": True,
+#                 "siren_film": False,
+#             }
+#         }
+#     ]
+
+
+# for i in range(3):
+#     EXPERIMENTS += [
+#         {
+#             "name": f"NewLearnedMathyAltEncodingTest{i}",
+#             "dataset": "VFX/firething",
+#             "config": {
+#                 "latent_dim": 0,
+#                 "trunk_pos_channels": 2,
+#                 "trunk_time_channels": 1,
+#                 "film_pos_channels": 256,
+#                 "film_time_channels": 64,
+#                 "film_pos_scheme": "analytic",
+#                 "film_time_scheme": "analytic",
+#                 "film_pos_include_raw": True,
+#                 "film_time_include_raw": True,
+#                 "prefilm_dims": 64,
+#                 "hidden_dim": 64,
+#                 "apply_film": [1],
+#                 "output_channels": 3,
+#                 "learned_encodings": True,
+#                 "siren_film": False,
+#                 "encoding_cycle": ["sin", "cos", "exp", "log1p"],
+#             }
+#         }
+#     ]
+
+
+# for i in range(3):
+#     EXPERIMENTS += [
+#         {
+#             "name": f"UnlearnedLessMathyEncodingTest{i}",
+#             "dataset": "VFX/firething",
+#             "config": {
+#                 "latent_dim": 0,
+#                 "trunk_pos_channels": 2,
+#                 "trunk_time_channels": 1,
+#                 "film_pos_channels": 256,
+#                 "film_time_channels": 64,
+#                 "film_pos_scheme": "less_mathy",
+#                 "film_time_scheme": "less_mathy",
+#                 "film_pos_include_raw": True,
+#                 "film_time_include_raw": True,
+#                 "prefilm_dims": 64,
+#                 "hidden_dim": 64,
+#                 "apply_film": [1],
+#                 "output_channels": 3,
+#                 "learned_encodings": False,
+#                 "siren_film": False,
+#             }
+#         }
+#     ]
+
+
 for i in range(3):
     EXPERIMENTS += [
         {
-            "name": f"BigLearnedMathyEncodingTest{i}",
-            "dataset": "VFX/firething",
+            "name": f"LinearFireCircleBigSinEncodingTest{i}",
+            "dataset": "VFX/fire_circles",
             "config": {
                 "latent_dim": 0,
                 "trunk_pos_channels": 2,
                 "trunk_time_channels": 1,
                 "film_pos_channels": 256,
                 "film_time_channels": 64,
-                "film_pos_scheme": "mathy",
-                "film_time_scheme": "mathy",
+                "film_pos_scheme": "analytic",
+                "film_time_scheme": "analytic",
                 "film_pos_include_raw": True,
                 "film_time_include_raw": True,
-                "prefilm_dims": 32,
+                "prefilm_dims": 64,
                 "hidden_dim": 64,
                 "apply_film": [1],
                 "output_channels": 3,
                 "learned_encodings": True,
                 "siren_film": False,
+                "encoding_cycle": ["sin"],
+                "frequency_initialization": "linear",
             }
         }
     ]
 
+
+# for i in range(3):
+#     EXPERIMENTS += [
+#         {
+#             "name": f"ExponentialFireCircleBigSinEncodingTest{i}",
+#             "dataset": "VFX/fire_circles",
+#             "config": {
+#                 "latent_dim": 0,
+#                 "trunk_pos_channels": 2,
+#                 "trunk_time_channels": 1,
+#                 "film_pos_channels": 256,
+#                 "film_time_channels": 64,
+#                 "film_pos_scheme": "analytic",
+#                 "film_time_scheme": "analytic",
+#                 "film_pos_include_raw": True,
+#                 "film_time_include_raw": True,
+#                 "prefilm_dims": 64,
+#                 "hidden_dim": 64,
+#                 "apply_film": [1],
+#                 "output_channels": 3,
+#                 "learned_encodings": True,
+#                 "siren_film": False,
+#                 "encoding_cycle": ["sin"],
+#                 "frequency_initialization": "exponential",
+#             }
+#         }
+#     ]
+
+
 for i in range(3):
     EXPERIMENTS += [
         {
-            "name": f"BigLearnedSinEncodingTest{i}",
-            "dataset": "VFX/firething",
+            "name": f"InverseFireCircleBigSinEncodingTest{i}",
+            "dataset": "VFX/fire_circles",
             "config": {
                 "latent_dim": 0,
                 "trunk_pos_channels": 2,
                 "trunk_time_channels": 1,
                 "film_pos_channels": 256,
                 "film_time_channels": 64,
-                "film_pos_scheme": "sinusoidal",
-                "film_time_scheme": "sinusoidal",
+                "film_pos_scheme": "analytic",
+                "film_time_scheme": "analytic",
                 "film_pos_include_raw": True,
                 "film_time_include_raw": True,
-                "prefilm_dims": 32,
+                "prefilm_dims": 64,
                 "hidden_dim": 64,
                 "apply_film": [1],
                 "output_channels": 3,
                 "learned_encodings": True,
                 "siren_film": False,
+                "encoding_cycle": ["sin"],
+                "frequency_initialization": "inverse",
             }
         }
     ]
@@ -322,27 +485,105 @@ for i in range(3):
 for i in range(3):
     EXPERIMENTS += [
         {
-            "name": f"BigLearnedLessMathyEncodingTest{i}",
-            "dataset": "VFX/firething",
+            "name": f"LogarithmicFireCircleBigSinEncodingTest{i}",
+            "dataset": "VFX/fire_circles",
             "config": {
                 "latent_dim": 0,
                 "trunk_pos_channels": 2,
                 "trunk_time_channels": 1,
                 "film_pos_channels": 256,
                 "film_time_channels": 64,
-                "film_pos_scheme": "less_mathy",
-                "film_time_scheme": "less_mathy",
+                "film_pos_scheme": "analytic",
+                "film_time_scheme": "analytic",
                 "film_pos_include_raw": True,
                 "film_time_include_raw": True,
-                "prefilm_dims": 32,
+                "prefilm_dims": 64,
                 "hidden_dim": 64,
                 "apply_film": [1],
                 "output_channels": 3,
                 "learned_encodings": True,
                 "siren_film": False,
+                "encoding_cycle": ["sin"],
+                "frequency_initialization": "logarithmic",
             }
         }
     ]
+
+
+# for i in range(3):
+#     EXPERIMENTS += [
+#         {
+#             "name": f"WidePreFilmPureSinEncodingTest{i}",
+#             "dataset": "VFX/firething",
+#             "config": {
+#                 "latent_dim": 0,
+#                 "trunk_pos_channels": 2,
+#                 "trunk_time_channels": 1,
+#                 "film_pos_channels": 256,
+#                 "film_time_channels": 64,
+#                 "film_pos_scheme": "sin",
+#                 "film_time_scheme": "sin",
+#                 "film_pos_include_raw": True,
+#                 "film_time_include_raw": True,
+#                 "prefilm_dims": 64,
+#                 "hidden_dim": 64,
+#                 "apply_film": [1],
+#                 "output_channels": 3,
+#                 "learned_encodings": True,
+#                 "siren_film": False,
+#             }
+#         }
+#     ]
+
+# for i in range(3):
+#         EXPERIMENTS += [
+#         {
+#             "name": f"UnlearnedWidePreFilmPureSinEncodingTest{i}",
+#             "dataset": "VFX/firething",
+#             "config": {
+#                 "latent_dim": 0,
+#                 "trunk_pos_channels": 2,
+#                 "trunk_time_channels": 1,
+#                 "film_pos_channels": 256,
+#                 "film_time_channels": 64,
+#                 "film_pos_scheme": "sin",
+#                 "film_time_scheme": "sin",
+#                 "film_pos_include_raw": True,
+#                 "film_time_include_raw": True,
+#                 "prefilm_dims": 64,
+#                 "hidden_dim": 64,
+#                 "apply_film": [1],
+#                 "output_channels": 3,
+#                 "learned_encodings": False,
+#                 "siren_film": False,
+#             }
+#         }
+#     ]
+
+# for i in range(3):
+#         EXPERIMENTS += [
+#         {
+#             "name": f"LatentUnlearnedWidePreFilmPureSinEncodingTest{i}",
+#             "dataset": "VFX/firething",
+#             "config": {
+#                 "latent_dim": 512,
+#                 "trunk_pos_channels": 2,
+#                 "trunk_time_channels": 1,
+#                 "film_pos_channels": 256,
+#                 "film_time_channels": 64,
+#                 "film_pos_scheme": "sin",
+#                 "film_time_scheme": "sin",
+#                 "film_pos_include_raw": True,
+#                 "film_time_include_raw": True,
+#                 "prefilm_dims": 64,
+#                 "hidden_dim": 64,
+#                 "apply_film": [1],
+#                 "output_channels": 3,
+#                 "learned_encodings": False,
+#                 "siren_film": False,
+#             }
+#         }
+#     ]
 
 # for i in range(3):
 #     EXPERIMENTS += [
