@@ -176,7 +176,7 @@ def compute_analytic_encoding(coords, target_dim, freqs=None, encoding_cycle=["s
         freqs = freqs[:target_dim]  # Ensure we only take as many frequencies as needed
 
     reshaped_coords = coords.repeat([1, math.ceil(target_dim / N)])
-    updated_coords = torch.clamp(freqs.unsqueeze(0) * reshaped_coords, min=0)
+    updated_coords = freqs.unsqueeze(0) * reshaped_coords
 
     encodings = []
     chunk_size = num_harmonics * N
@@ -191,11 +191,26 @@ def compute_analytic_encoding(coords, target_dim, freqs=None, encoding_cycle=["s
         elif func == "exp":
             encodings.append(torch.exp(chunk))
         elif func == "log1p":
+            chunk = torch.nn.functional.softplus(chunk)  # Ensure positivity for stability
             encodings.append(torch.log1p(chunk))
         else:
             raise ValueError(f"Unknown encoding function: {func}")
-
     return torch.cat(encodings, dim=1)
+
+def compute_helmholtz_encoding(coords, target_dim, wavevectors):
+    transform = (coords * 2 * np.pi) @ wavevectors.T
+    return torch.sin(transform)
+
+def compute_full_helmholtz_encoding(coords, target_dim, wavevectors):
+    transform = (coords * 2 * np.pi) @ wavevectors.T
+    sin_term = torch.sin(transform).unsqueeze(-1)
+    cos_term = torch.cos(transform)
+
+    k_norm = torch.linalg.norm(wavevectors, dim=1, keepdim=True).clamp(min=1e-5)
+    k_rot  = torch.stack([-wavevectors[:, 1], wavevectors[:, 0]], dim=1) / k_norm
+    v_k    = (cos_term[:, :, None] * wavevectors) / k_norm
+    v_krot = cos_term[:, :, None] * k_rot
+    return torch.cat([sin_term, v_k, v_krot], dim=-1)
 
 def compute_linear_encoding(x, target_dim):
     return x.repeat(1, target_dim // x.shape[-1])[:, :target_dim]
@@ -220,12 +235,15 @@ def compute_targeted_encodings(x, target_dim, scheme="spiral", include_raw=False
     encodings = []
 
     if include_raw:
+        if scheme == "full_helmholtz":
+            target = N * 2 + 1
+            encodings.append(x.repeat(target))
         encodings.append(x)
         target_dim -= N
     target_dim = int(target_dim)
 
     if target_dim > 0:
-        if scheme in ["spiral", "sinusoidal", "mathy", "less_mathy", "sinexp", "coslog", "analytic"]:
+        if scheme in ["spiral", "sinusoidal", "mathy", "less_mathy", "sinexp", "coslog", "analytic", "helmholtz", "full_helmholtz"]:
             encoding_fn = {
                 "spiral": compute_spiral_encoding,
                 "sinusoidal": compute_sinusoidal_encoding,
@@ -233,9 +251,11 @@ def compute_targeted_encodings(x, target_dim, scheme="spiral", include_raw=False
                 "less_mathy": compute_less_mathy_encoding,
                 "sinexp": compute_sinexp_encoding,
                 "coslog": compute_coslog_encoding,
-                "analytic": partial(compute_analytic_encoding, encoding_cycle=encoding_cycle)
+                "analytic": partial(compute_analytic_encoding, encoding_cycle=encoding_cycle),
+                "helmholtz": compute_helmholtz_encoding,
+                "full_helmholtz": compute_full_helmholtz_encoding,
             }[scheme]
-            encodings.append(encoding_fn(x, target_dim, freqs=freqs))
+            encodings.append(encoding_fn(x, target_dim, freqs))
         elif scheme == "gaussian":
             encodings.append(compute_gaussian_encoding(x, target_dim, seed=seed))
         elif scheme == "linear":

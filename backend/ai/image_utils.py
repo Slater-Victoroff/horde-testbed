@@ -94,7 +94,7 @@ def load_images(image_dir, input_image_channels=4, control_channels=2, norm=True
     return normalized_frames
 
 def save_images(model, H=256, W=256, n_images=5, gif_frames=20, base_dir=None, write_files=True):
-    with torch.no_grad():
+    with torch.inference_mode   ():
         times = torch.rand(n_images, device=model.device)
 
         # Generate reconstructed RGB images for each selected control vector

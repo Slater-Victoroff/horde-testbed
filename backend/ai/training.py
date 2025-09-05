@@ -31,8 +31,9 @@ def run_single_job(job, static_dir):
         print(f"Starting VFX Model: {name}")
         train_job(
             image_dir=dataset_path,
-            device=torch.device("cuda"),
+            device=torch.device(decoder_config.pop("device", "cuda")),
             experiment_name=name,
+            decoder_type=decoder_config.pop("decoder_type"),
             decoder_config=decoder_config,
         )
         print(f"Finished: {name}")
@@ -46,9 +47,6 @@ def run_single_job(job, static_dir):
 
 
 def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-
     STATIC_DIR = Path("/app/static")
 
     queue = deque()
