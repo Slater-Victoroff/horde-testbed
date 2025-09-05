@@ -398,32 +398,272 @@ EXPERIMENTS = []
 #     ]
 
 
-for i in range(3):
-    EXPERIMENTS += [
-        {
-            "name": f"LinearFireCircleBigSinEncodingTest{i}",
-            "dataset": "VFX/fire_circles",
-            "config": {
-                "latent_dim": 0,
-                "trunk_pos_channels": 2,
-                "trunk_time_channels": 1,
-                "film_pos_channels": 256,
-                "film_time_channels": 64,
-                "film_pos_scheme": "analytic",
-                "film_time_scheme": "analytic",
-                "film_pos_include_raw": True,
-                "film_time_include_raw": True,
-                "prefilm_dims": 64,
-                "hidden_dim": 64,
-                "apply_film": [1],
-                "output_channels": 3,
-                "learned_encodings": True,
-                "siren_film": False,
-                "encoding_cycle": ["sin"],
-                "frequency_initialization": "linear",
-            }
+# for i in range(3):
+#     EXPERIMENTS += [
+#         {
+#             "name": f"LinearFireCircleBigSinEncodingTest{i}",
+#             "dataset": "VFX/fire_circles",
+#             "config": {
+#                 "latent_dim": 0,
+#                 "trunk_pos_channels": 2,
+#                 "trunk_time_channels": 1,
+#                 "film_pos_channels": 256,
+#                 "film_time_channels": 64,
+#                 "film_pos_scheme": "analytic",
+#                 "film_time_scheme": "analytic",
+#                 "film_pos_include_raw": True,
+#                 "film_time_include_raw": True,
+#                 "prefilm_dims": 64,
+#                 "hidden_dim": 64,
+#                 "apply_film": [1],
+#                 "output_channels": 3,
+#                 "learned_encodings": True,
+#                 "siren_film": False,
+#                 "encoding_cycle": ["sin"],
+#                 "frequency_initialization": "linear",
+#             }
+#         }
+#     ]
+
+
+# for i in range(3):
+#     EXPERIMENTS += [
+#         {
+#             "name": f"WidePrefilmNarrowTrunkFireCircle{i}",
+#             "dataset": "VFX/fire_circles",
+#             "config": {
+#                 "latent_dim": 0,
+#                 "trunk_pos_channels": 2,
+#                 "trunk_time_channels": 1,
+#                 "film_pos_channels": 256,
+#                 "film_time_channels": 64,
+#                 "film_pos_scheme": "analytic",
+#                 "film_time_scheme": "analytic",
+#                 "film_pos_include_raw": True,
+#                 "film_time_include_raw": True,
+#                 "prefilm_dims": 128,
+#                 "hidden_dim": 32,
+#                 "apply_film": [1],
+#                 "output_channels": 3,
+#                 "learned_encodings": True,
+#                 "siren_film": False,
+#                 "encoding_cycle": ["sin"],
+#                 "frequency_initialization": "linear",
+#             }
+#         }
+#     ]
+
+
+# for i in range(3):
+#     EXPERIMENTS += [
+#         {
+#             "name": f"LogRetestWidePrefilmFireCircle{i}",
+#             "dataset": "VFX/fire_circles",
+#             "config": {
+#                 "latent_dim": 0,
+#                 "trunk_pos_channels": 2,
+#                 "trunk_time_channels": 1,
+#                 "film_pos_channels": 256,
+#                 "film_time_channels": 64,
+#                 "film_pos_scheme": "analytic",
+#                 "film_time_scheme": "analytic",
+#                 "film_pos_include_raw": True,
+#                 "film_time_include_raw": True,
+#                 "prefilm_dims": 128,
+#                 "hidden_dim": 64,
+#                 "apply_film": [1],
+#                 "output_channels": 3,
+#                 "learned_encodings": True,
+#                 "siren_film": False,
+#                 "encoding_cycle": ["sin"],
+#                 "frequency_initialization": "logarithmic",
+#             }
+#         }
+#     ]
+
+# for i in range(3):
+#     EXPERIMENTS += [
+#         {
+#             "name": f"HelmholtzMSE128HiddenFireCircle{i}",
+#             "dataset": "VFX/fire_circles",
+#             "config": {
+#                 "latent_dim": 0,
+#                 "trunk_pos_channels": 2,
+#                 "trunk_time_channels": 1,
+#                 "film_pos_channels": 256,
+#                 "film_time_channels": 64,
+#                 "film_pos_scheme": "helmholtz",
+#                 "film_time_scheme": "analytic",
+#                 "film_pos_include_raw": True,
+#                 "film_time_include_raw": True,
+#                 "prefilm_dims": 128,
+#                 "hidden_dim": 128,
+#                 "apply_film": [1],
+#                 "output_channels": 3,
+#                 "learned_encodings": True,
+#                 "encoding_cycle": ["sin"],
+#                 "target_resolution": 512,
+#             }
+#         }
+#     ]
+
+# for i in range(2):
+#     EXPERIMENTS += [
+#         {
+#             "name": f"FullNormedHelmholtzFireCircle{i}",
+#             "dataset": "VFX/fire_circles",
+#             "config": {
+#                 "latent_dim": 0,
+#                 "trunk_pos_channels": 2,
+#                 "trunk_time_channels": 1,
+#                 "film_pos_channels": 256,
+#                 "film_time_channels": 64,
+#                 "film_pos_scheme": "helmholtz",
+#                 "film_time_scheme": "analytic",
+#                 "film_pos_include_raw": True,
+#                 "film_time_include_raw": True,
+#                 "prefilm_dims": 128,
+#                 "hidden_dim": 64,
+#                 "apply_film": [1],
+#                 "output_channels": 3,
+#                 "learned_encodings": True,
+#                 "encoding_cycle": ["sin"],
+#                 "target_resolution": 512,
+#             }
+#         }
+#     ]
+
+# for i in range(3):
+#     EXPERIMENTS += [
+#         {
+#             "name": f"SpecificFireCircle{i}",
+#             "dataset": "VFX/fire_circles",
+#             "config": {
+#                 "decoder_type": "Specific",
+#                 "device": "cuda:1",
+#             }
+#         }
+#     ]
+
+# for i in range(2):
+EXPERIMENTS += [
+    {
+        "name": f"BigBeauty",
+        "dataset": "benchmarks/uvg/beauty",
+        "config": {
+            "decoder_type": "Big",
+            "device": "cuda",
         }
-    ]
+    }
+]
+
+# for i in range(3):
+#     EXPERIMENTS += [
+#         {
+#             "name": f"SinCosPSNRFireCircle{i}",
+#             "dataset": "VFX/fire_circles",
+#             "config": {
+#                 "latent_dim": 0,
+#                 "trunk_pos_channels": 2,
+#                 "trunk_time_channels": 1,
+#                 "film_pos_channels": 256,
+#                 "film_time_channels": 64,
+#                 "film_pos_scheme": "analytic",
+#                 "film_time_scheme": "analytic",
+#                 "film_pos_include_raw": True,
+#                 "film_time_include_raw": True,
+#                 "prefilm_dims": 128,
+#                 "hidden_dim": 64,
+#                 "apply_film": [1],
+#                 "output_channels": 3,
+#                 "learned_encodings": True,
+#                 "encoding_cycle": ["sin", "cos"],
+#                 "target_resolution": 512,
+#             }
+#         }
+#     ]
+
+# for i in range(3):
+#     EXPERIMENTS += [
+#         {
+#             "name": f"PureMSEFireCircle{i}",
+#             "dataset": "VFX/fire_circles",
+#             "config": {
+#                 "latent_dim": 0,
+#                 "trunk_pos_channels": 2,
+#                 "trunk_time_channels": 1,
+#                 "film_pos_channels": 256,
+#                 "film_time_channels": 64,
+#                 "film_pos_scheme": "analytic",
+#                 "film_time_scheme": "analytic",
+#                 "film_pos_include_raw": True,
+#                 "film_time_include_raw": True,
+#                 "prefilm_dims": 128,
+#                 "hidden_dim": 64,
+#                 "apply_film": [1],
+#                 "output_channels": 3,
+#                 "learned_encodings": True,
+#                 "siren_film": False,
+#                 "encoding_cycle": ["sin"],
+#                 "frequency_initialization": "linear",
+#             }
+#         }
+#     ]
+
+# for i in range(3):
+#     EXPERIMENTS += [
+#         {
+#             "name": f"TopWidePrefilmFireCircle{i}",
+#             "dataset": "VFX/fire_circles",
+#             "config": {
+#                 "latent_dim": 0,
+#                 "trunk_pos_channels": 2,
+#                 "trunk_time_channels": 1,
+#                 "film_pos_channels": 512,
+#                 "film_time_channels": 64,
+#                 "film_pos_scheme": "analytic",
+#                 "film_time_scheme": "analytic",
+#                 "film_pos_include_raw": True,
+#                 "film_time_include_raw": True,
+#                 "prefilm_dims": 64,
+#                 "hidden_dim": 64,
+#                 "apply_film": [1],
+#                 "output_channels": 3,
+#                 "learned_encodings": True,
+#                 "siren_film": False,
+#                 "encoding_cycle": ["sin"],
+#                 "frequency_initialization": "linear",
+#             }
+#         }
+#     ]
+
+
+# for i in range(3):
+#     EXPERIMENTS += [
+#         {
+#             "name": f"DoubleWidePrefilmFireCircle{i}",
+#             "dataset": "VFX/fire_circles",
+#             "config": {
+#                 "latent_dim": 0,
+#                 "trunk_pos_channels": 2,
+#                 "trunk_time_channels": 1,
+#                 "film_pos_channels": 512,
+#                 "film_time_channels": 64,
+#                 "film_pos_scheme": "analytic",
+#                 "film_time_scheme": "analytic",
+#                 "film_pos_include_raw": True,
+#                 "film_time_include_raw": True,
+#                 "prefilm_dims": 128,
+#                 "hidden_dim": 64,
+#                 "apply_film": [1],
+#                 "output_channels": 3,
+#                 "learned_encodings": True,
+#                 "siren_film": False,
+#                 "encoding_cycle": ["sin"],
+#                 "frequency_initialization": "linear",
+#             }
+#         }
+#     ]
 
 
 # for i in range(3):
@@ -454,60 +694,32 @@ for i in range(3):
 #     ]
 
 
-for i in range(3):
-    EXPERIMENTS += [
-        {
-            "name": f"InverseFireCircleBigSinEncodingTest{i}",
-            "dataset": "VFX/fire_circles",
-            "config": {
-                "latent_dim": 0,
-                "trunk_pos_channels": 2,
-                "trunk_time_channels": 1,
-                "film_pos_channels": 256,
-                "film_time_channels": 64,
-                "film_pos_scheme": "analytic",
-                "film_time_scheme": "analytic",
-                "film_pos_include_raw": True,
-                "film_time_include_raw": True,
-                "prefilm_dims": 64,
-                "hidden_dim": 64,
-                "apply_film": [1],
-                "output_channels": 3,
-                "learned_encodings": True,
-                "siren_film": False,
-                "encoding_cycle": ["sin"],
-                "frequency_initialization": "inverse",
-            }
-        }
-    ]
-
-
-for i in range(3):
-    EXPERIMENTS += [
-        {
-            "name": f"LogarithmicFireCircleBigSinEncodingTest{i}",
-            "dataset": "VFX/fire_circles",
-            "config": {
-                "latent_dim": 0,
-                "trunk_pos_channels": 2,
-                "trunk_time_channels": 1,
-                "film_pos_channels": 256,
-                "film_time_channels": 64,
-                "film_pos_scheme": "analytic",
-                "film_time_scheme": "analytic",
-                "film_pos_include_raw": True,
-                "film_time_include_raw": True,
-                "prefilm_dims": 64,
-                "hidden_dim": 64,
-                "apply_film": [1],
-                "output_channels": 3,
-                "learned_encodings": True,
-                "siren_film": False,
-                "encoding_cycle": ["sin"],
-                "frequency_initialization": "logarithmic",
-            }
-        }
-    ]
+# for i in range(3):
+#     EXPERIMENTS += [
+#         {
+#             "name": f"NewInverseFireCircleBigSinEncodingTest{i}",
+#             "dataset": "VFX/fire_circles",
+#             "config": {
+#                 "latent_dim": 0,
+#                 "trunk_pos_channels": 2,
+#                 "trunk_time_channels": 1,
+#                 "film_pos_channels": 256,
+#                 "film_time_channels": 64,
+#                 "film_pos_scheme": "analytic",
+#                 "film_time_scheme": "analytic",
+#                 "film_pos_include_raw": True,
+#                 "film_time_include_raw": True,
+#                 "prefilm_dims": 64,
+#                 "hidden_dim": 64,
+#                 "apply_film": [1],
+#                 "output_channels": 3,
+#                 "learned_encodings": True,
+#                 "siren_film": False,
+#                 "encoding_cycle": ["sin"],
+#                 "frequency_initialization": "inverse",
+#             }
+#         }
+#     ]
 
 
 # for i in range(3):
